@@ -3,6 +3,7 @@ import {
   restoreSession, login as sbLogin, logout as sbLogout, currentUser,
   loadMyData, saveMyData, updateMyCerts,
   adminListUsers, adminCreateUser, adminDeleteUser, adminUpdatePassword, adminSetActive,
+  uploadReceipt, getReceiptUrl, deleteReceipt,
 } from "./supabase.js";
 
 /* ============================================================
@@ -32,18 +33,38 @@ const CATS = [
   { key: "ethics", label: "윤리" },
   { key: "superv", label: "수퍼비전" },
   { key: "general", label: "일반" },
+  { key: "trauma", label: "트라우마 케어" },
+  { key: "comorbid", label: "동반질환" },
 ];
 const catLabel = (k) => CATS.find((c) => c.key === k)?.label || k;
+// 항목 목록: 자격의 첫 갱신 여부에 따라 노출할 항목 결정
+function catsFor(cert) {
+  const base = ["ethics", "superv", "general"];
+  const extra = (cert.firstRenewal && cert.firstExtra) ? Object.keys(cert.firstExtra) : [];
+  return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key));
+}
 
 const DEFAULT_CERTS = {
   BCBA: { org: "BACB", cycle: 24, total: 32, req: { ethics: 4, superv: 3, general: 0 },
-    note: "수퍼비전 3시간은 RBT·BCaBA·수련생을 감독하는 경우에만 필수. 2027-01-01 이후 시작 주기부터 수퍼비전 4시간으로 상향. CEU는 BACB 승인(ACE) 제공기관 이수분만 인정.", src: "bacb.com BCBA Handbook" },
+    note: "수퍼비전 3시간은 RBT·BCaBA·수련생을 감독하는 경우에만 필수. 2027-01-01 이후 시작 주기부터 수퍼비전 4시간으로 상향. CEU는 BACB 승인(ACE) 제공기관 이수분만 인정.", src: "bacb.com BCBA Handbook",
+    firstExtra: null,
+    training: "감독을 하려면 인증 전(최대 180일 이내)에 8시간 수퍼비전 트레이닝을 최초 1회 이수해야 합니다. (갱신 CEU와 별개)" },
   "ABAS-1": { org: "한국 KACBA", cycle: 24, total: 32, req: { ethics: 4, superv: 3, general: 0 },
-    note: "응용행동분석전문가 1급. 윤리 4시간·수퍼비전 3시간 의무. 한 과목을 윤리·수퍼비전 이중 계산 불가.", src: "abas.co.kr 자격 유지" },
+    note: "응용행동분석전문가 1급. 윤리 4시간·수퍼비전 3시간 의무. 한 과목을 윤리·수퍼비전 이중 계산 불가.", src: "abas.co.kr 자격 유지",
+    firstExtra: null,
+    training: "수퍼바이저 자격훈련을 최초 1회 이수해야 자격이 발급됩니다(BACB 8시간 트레이닝으로 대체 가능). 이후에는 수퍼비전 3시간만. (갱신 CEU와 별개)" },
   QBA: { org: "QABA", cycle: 24, total: 32, req: { ethics: 3, superv: 8, general: 0 },
-    note: "수퍼비전은 대면/실시간 온라인 25% 이상 수강. 2024-01-01부터 첫 갱신엔 트라우마 케어 2시간·동반질환 2시간 추가.", src: "qababoard.com Renewal" },
+    note: "수퍼비전은 대면/실시간 온라인 25% 이상 수강.", src: "qababoard.com Renewal",
+    firstExtra: { trauma: 2, comorbid: 2 },
+    training: null },
+  "QASP-S": { org: "QABA", cycle: 24, total: 20, req: { ethics: 2, superv: 0, general: 0 },
+    note: "총 20시간·윤리 2시간. 수퍼비전은 CEU가 아니라 직접케어 5% 감독(별개 실무요건). 수퍼바이저 자격 유지 위해 8시간 수퍼비전 코스워크 필요.", src: "qababoard.com Renewal",
+    firstExtra: { trauma: 2 },
+    training: null },
   KBA: { org: "한국행동분석학회", cycle: 36, total: 36, req: { ethics: 0, superv: 0, general: 0 },
-    note: "3년마다 갱신, 3년간 36시간 이상(50분 단위). 윤리·수퍼비전 세부 의무시간 규정 없음. 갱신 기산일=취득일.", src: "kabac.or.kr 자격 유지 안내" },
+    note: "3년마다 갱신, 3년간 36시간 이상(50분 단위). 윤리·수퍼비전 세부 의무시간 규정 없음. 갱신 기산일=취득일.", src: "kabac.or.kr 자격 유지 안내",
+    firstExtra: null,
+    training: null },
 };
 const CERT_NAMES = Object.keys(DEFAULT_CERTS);
 
@@ -69,13 +90,31 @@ function fmtK(iso) {
 
 function blankCert(name) {
   const b = DEFAULT_CERTS[name];
-  return { name, org: b.org, acquired: "2020-01-01", cycle: b.cycle, total: b.total, req: { ...b.req }, note: b.note, src: b.src };
+  return { name, org: b.org, acquired: "2020-01-01", cycle: b.cycle, total: b.total, req: { ...b.req },
+    note: b.note, src: b.src, firstExtra: b.firstExtra || null, training: b.training || null,
+    firstRenewal: false, trainingDone: false };
 }
 function blankRecord() { return { id: uid(), title: "", date: todayISO(), appliesTo: {} }; }
 function sumForCert(records, name) {
-  const s = { ethics: 0, superv: 0, general: 0 };
+  const s = { ethics: 0, superv: 0, general: 0, trauma: 0, comorbid: 0 };
   records.forEach((r) => { const a = r.appliesTo[name]; if (a) s[a.cat] = (s[a.cat] || 0) + Number(a.hours || 0); });
   return s;
+}
+// 첫 갱신 여부 반영한 총 필요시간(추가 CEU 포함)
+function totalNeeded(cert) {
+  let t = Number(cert.total || 0);
+  if (cert.firstRenewal && cert.firstExtra) {
+    Object.values(cert.firstExtra).forEach((h) => { t += Number(h || 0); });
+  }
+  return t;
+}
+// 현재 자격에서 요구하는 항목별 최소요구(첫 갱신 추가 포함)
+function reqFor(cert) {
+  const r = { ...cert.req };
+  if (cert.firstRenewal && cert.firstExtra) {
+    Object.entries(cert.firstExtra).forEach(([k, h]) => { r[k] = Number(h || 0); });
+  }
+  return r;
 }
 
 // 내 데이터 기본 형태
@@ -355,14 +394,17 @@ function Dashboard({ me, data, onOpen }) {
   const cards = me.myCerts.map((n) => {
     const cert = data.certs[n];
     const sums = sumForCert(data.records, n);
-    const done = sums.ethics + sums.superv + sums.general;
-    const pct = cert.total ? Math.min(100, Math.round((done / cert.total) * 100)) : 0;
+    const need = reqFor(cert);
+    const tot = totalNeeded(cert);
+    const visibleCats = catsFor(cert);
+    // 노출 항목의 합만 총 이수로 집계
+    const done = visibleCats.reduce((acc, c) => acc + (sums[c.key] || 0), 0);
+    const pct = tot ? Math.min(100, Math.round((done / tot) * 100)) : 0;
     const renewal = addMonths(cert.acquired, cert.cycle);
     const dday = daysBetween(renewal, todayISO());
-    const lackTotal = Math.max(0, cert.total - done);
-    // 항목별 부족
-    const lacks = CATS.filter((c) => cert.req[c.key] > 0).map((c) => ({ label: c.label, lack: Math.max(0, cert.req[c.key] - sums[c.key]) }));
-    return { n, cert, done, pct, renewal, dday, lackTotal, lacks };
+    const lackTotal = Math.max(0, tot - done);
+    const lacks = visibleCats.filter((c) => need[c.key] > 0).map((c) => ({ label: c.label, lack: Math.max(0, need[c.key] - sums[c.key]) }));
+    return { n, cert, done, tot, pct, renewal, dday, lackTotal, lacks };
   });
 
   return (
@@ -405,7 +447,7 @@ function Dashboard({ me, data, onOpen }) {
           if (c.dday < 0) { ddBg = BAD; ddTxt = `D+${-c.dday}`; ddMsg = "기한 경과"; }
           else if (c.dday <= 90) { ddBg = BAD; ddMsg = "임박"; }
           else if (c.dday <= 180) { ddBg = WARN; ddMsg = "준비"; }
-          const complete = c.done >= c.cert.total && c.lacks.every((l) => l.lack === 0);
+          const complete = c.done >= c.tot && c.lacks.every((l) => l.lack === 0);
           return (
             <button key={c.n} onClick={() => onOpen(c.n)} className="card" style={{ padding: 18, textAlign: "left", cursor: "pointer", border: `1px solid ${LINE}` }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -417,7 +459,7 @@ function Dashboard({ me, data, onOpen }) {
               </div>
 
               <div style={{ margin: "14px 0 6px", display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                <span style={{ fontWeight: 700 }}>{c.done} / {c.cert.total} 시간</span>
+                <span style={{ fontWeight: 700 }}>{c.done} / {c.tot} 시간</span>
                 <span style={{ color: complete ? OK : PKD, fontWeight: 800 }}>{complete ? "충족 ✓" : `${c.lackTotal}시간 부족`}</span>
               </div>
               <div style={{ height: 10, background: LINE, borderRadius: 999, overflow: "hidden" }}>
@@ -452,8 +494,11 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
   const renewalDate = useMemo(() => addMonths(cert.acquired, cert.cycle), [cert.acquired, cert.cycle]);
   const dday = useMemo(() => daysBetween(renewalDate, todayISO()), [renewalDate]);
   const sums = useMemo(() => sumForCert(records, cert.name), [records, cert.name]);
-  const totalDone = sums.ethics + sums.superv + sums.general;
-  const totalPct = cert.total ? Math.min(100, Math.round((totalDone / cert.total) * 100)) : 0;
+  const visibleCats = catsFor(cert);
+  const need = reqFor(cert);
+  const tot = totalNeeded(cert);
+  const totalDone = visibleCats.reduce((acc, c) => acc + (sums[c.key] || 0), 0);
+  const totalPct = tot ? Math.min(100, Math.round((totalDone / tot) * 100)) : 0;
 
   return (
     <>
@@ -463,7 +508,7 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
         <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 14, alignItems: "flex-start" }}>
           <div>
             <div style={{ fontSize: 22, fontWeight: 800 }}>{cert.name}</div>
-            <div style={{ fontSize: 13, color: MUTE, marginTop: 3 }}>{cert.org} · 갱신주기 {cert.cycle}개월 · 필요시간 {cert.total}시간</div>
+            <div style={{ fontSize: 13, color: MUTE, marginTop: 3 }}>{cert.org} · 갱신주기 {cert.cycle}개월 · 필요시간 {tot}시간{cert.firstRenewal && cert.firstExtra ? " (첫 갱신 추가 포함)" : ""}</div>
           </div>
           {dday !== null && (
             <span style={{ background: dday < 0 ? BAD : dday <= 90 ? BAD : dday <= 180 ? WARN : OK, color: "#fff", borderRadius: 999, padding: "5px 13px", fontWeight: 800, fontSize: 15 }}>
@@ -489,31 +534,60 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
           </div>
         )}
 
+        {/* 첫 갱신 여부 (추가 CEU가 있는 자격만 체크 의미가 큼) */}
+        <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+            <input type="checkbox" checked={!!cert.firstRenewal} onChange={(e) => onChangeCert({ firstRenewal: e.target.checked })} />
+            이번이 첫 갱신입니다
+          </label>
+          {cert.firstRenewal && cert.firstExtra && (
+            <span style={{ fontSize: 12, color: PKD, fontWeight: 700 }}>
+              → 추가 요건: {Object.entries(cert.firstExtra).map(([k, h]) => `${catLabel(k)} ${h}h`).join(", ")}
+            </span>
+          )}
+          {cert.firstRenewal && !cert.firstExtra && (
+            <span style={{ fontSize: 12, color: MUTE }}>→ 이 자격은 첫 갱신 추가 CEU가 없습니다.</span>
+          )}
+        </div>
+
+        {/* 1회성 트레이닝 안내 (BCBA·ABAS-1) */}
+        {cert.training && (
+          <div style={{ marginTop: 10, fontSize: 12.5, background: PKL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={!!cert.trainingDone} onChange={(e) => onChangeCert({ trainingDone: e.target.checked })} style={{ marginTop: 2 }} />
+              <span><b style={{ color: PKD }}>1회성 수퍼바이저 트레이닝</b> — {cert.training} {cert.trainingDone ? "✓ 이수함" : ""}</span>
+            </label>
+          </div>
+        )}
+
         <div style={{ marginTop: 18 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
             <span style={{ fontWeight: 700 }}>전체 이수</span>
-            <span style={{ fontWeight: 800, color: totalDone >= cert.total ? OK : PKD }}>{totalDone} / {cert.total} 시간</span>
+            <span style={{ fontWeight: 800, color: totalDone >= tot ? OK : PKD }}>{totalDone} / {tot} 시간</span>
           </div>
           <div style={{ height: 12, background: LINE, borderRadius: 999, overflow: "hidden" }}>
-            <div style={{ width: `${totalPct}%`, height: "100%", background: totalDone >= cert.total ? OK : PK }} />
+            <div style={{ width: `${totalPct}%`, height: "100%", background: totalDone >= tot ? OK : PK }} />
           </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginTop: 16 }}>
-          {CATS.map((c) => {
-            const done = sums[c.key], need = Number(cert.req[c.key] || 0), met = done >= need;
+          {visibleCats.map((c) => {
+            const done = sums[c.key], needH = Number(need[c.key] || 0), met = done >= needH;
+            const isExtra = cert.firstExtra && cert.firstExtra[c.key] != null; // 첫갱신 추가 항목
             return (
-              <div key={c.key} style={{ border: `1px solid ${LINE}`, borderRadius: 12, padding: 14 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: MUTE, marginBottom: 8 }}>{c.label}</div>
+              <div key={c.key} style={{ border: `1px solid ${isExtra ? PK : LINE}`, borderRadius: 12, padding: 14, background: isExtra ? PKL : "#fff" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: isExtra ? PKD : MUTE, marginBottom: 8 }}>{c.label}{isExtra ? " (첫 갱신)" : ""}</div>
                 <div style={{ fontSize: 26, fontWeight: 800, color: met ? OK : INK }}>{done}<span style={{ fontSize: 14, color: MUTE, fontWeight: 600 }}> 시간</span></div>
                 <div style={{ fontSize: 12, marginTop: 6, color: met ? OK : BAD, fontWeight: 700 }}>
-                  {need > 0 ? (met ? "✓ 요구 충족" : `${Math.max(0, need - done)}시간 부족 (요구 ${need})`) : "요구 없음"}
+                  {needH > 0 ? (met ? "✓ 요구 충족" : `${Math.max(0, needH - done)}시간 부족 (요구 ${needH})`) : "요구 없음"}
                 </div>
-                <div style={{ marginTop: 5 }}>
-                  <label className="lbl" style={{ margin: 0, fontSize: 11 }}>최소요구</label>
-                  <input type="number" className="inp" style={{ padding: "5px 8px", fontSize: 13 }} value={cert.req[c.key]}
-                    onChange={(e) => onChangeCert({ req: { ...cert.req, [c.key]: Number(e.target.value) } })} />
-                </div>
+                {!isExtra && (
+                  <div style={{ marginTop: 5 }}>
+                    <label className="lbl" style={{ margin: 0, fontSize: 11 }}>최소요구</label>
+                    <input type="number" className="inp" style={{ padding: "5px 8px", fontSize: 13 }} value={cert.req[c.key] ?? 0}
+                      onChange={(e) => onChangeCert({ req: { ...cert.req, [c.key]: Number(e.target.value) } })} />
+                  </div>
+                )}
               </div>
             );
           })}
@@ -538,7 +612,11 @@ function RecordManager({ activeCert, records, setRecords }) {
     if (i >= 0) { const c = [...rs]; c[i] = rec; return c; }
     return [...rs, rec];
   });
-  const delRecord = (id) => setRecords((rs) => rs.filter((r) => r.id !== id));
+  const delRecord = (id) => setRecords((rs) => {
+    const target = rs.find((r) => r.id === id);
+    if (target && target.receiptPath) { deleteReceipt(target.receiptPath); }
+    return rs.filter((r) => r.id !== id);
+  });
   const visible = records.filter((r) => r.appliesTo[activeCert]);
 
   const onFile = async (file) => {
@@ -569,7 +647,11 @@ function RecordManager({ activeCert, records, setRecords }) {
         if (CERT_NAMES.includes(a.cert)) appliesTo[a.cert] = { hours: Number(a.hours) || 0, cat: ["ethics", "superv", "general"].includes(a.cat) ? a.cat : "general" };
       });
       if (Object.keys(appliesTo).length === 0) appliesTo[activeCert] = { hours: 0, cat: "general" };
-      setReview({ id: uid(), title: String(o.title || "이수 항목"), date: /^\d{4}-\d{2}-\d{2}$/.test(o.date) ? o.date : todayISO(), appliesTo });
+      // 이수증 원본 사진을 Storage에 저장(실패해도 인식 결과는 유지)
+      let receiptPath = null;
+      const up = await uploadReceipt(b64, media);
+      if (up && up.path) receiptPath = up.path;
+      setReview({ id: uid(), title: String(o.title || "이수 항목"), date: /^\d{4}-\d{2}-\d{2}$/.test(o.date) ? o.date : todayISO(), appliesTo, receiptPath });
     } catch (err) {
       setErrMsg(err.message || "인식에 실패했습니다. 직접 입력해주세요.");
     } finally { setBusy(false); if (fileRef.current) fileRef.current.value = ""; }
@@ -623,6 +705,15 @@ function RecordManager({ activeCert, records, setRecords }) {
 
 function RecordRow({ rec, activeCert, onEdit, onDelete }) {
   const list = CERT_NAMES.filter((n) => rec.appliesTo[n]);
+  const [loadingImg, setLoadingImg] = useState(false);
+  const viewReceipt = async () => {
+    if (loadingImg) return;
+    setLoadingImg(true);
+    const res = await getReceiptUrl(rec.receiptPath);
+    setLoadingImg(false);
+    if (res && res.url) window.open(res.url, "_blank");
+    else alert("원본을 불러오지 못했습니다.");
+  };
   return (
     <div style={{ border: `1px solid ${LINE}`, borderRadius: 12, padding: "12px 14px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
@@ -631,6 +722,11 @@ function RecordRow({ rec, activeCert, onEdit, onDelete }) {
           <div style={{ fontSize: 12.5, color: MUTE, marginTop: 2 }}>{fmtK(rec.date)}</div>
         </div>
         <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+          {rec.receiptPath && (
+            <button onClick={viewReceipt} className="btn btn-ghost" style={{ padding: "5px 10px", fontSize: 12.5 }}>
+              {loadingImg ? "…" : "📎 원본"}
+            </button>
+          )}
           <button onClick={onEdit} className="btn btn-ghost" style={{ padding: "5px 10px", fontSize: 12.5 }}>편집</button>
           <button onClick={onDelete} style={{ border: "none", background: "transparent", color: MUTE, fontSize: 18, lineHeight: 1 }}>×</button>
         </div>
@@ -683,7 +779,12 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave }) {
                         <input type="number" className="inp" style={{ padding: "6px 9px" }} value={draft.appliesTo[n].hours} onChange={(e) => setField(n, "hours", Number(e.target.value))} /></div>
                       <div><label className="lbl" style={{ fontSize: 11 }}>항목</label>
                         <select className="inp" style={{ padding: "6px 9px" }} value={draft.appliesTo[n].cat} onChange={(e) => setField(n, "cat", e.target.value)}>
-                          {CATS.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                          {(() => {
+                            const base = ["ethics", "superv", "general"];
+                            const extra = DEFAULT_CERTS[n] && DEFAULT_CERTS[n].firstExtra ? Object.keys(DEFAULT_CERTS[n].firstExtra) : [];
+                            return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key))
+                              .map((c) => <option key={c.key} value={c.key}>{c.label}{extra.includes(c.key) ? " (첫 갱신)" : ""}</option>);
+                          })()}
                         </select></div>
                     </div>
                   )}
