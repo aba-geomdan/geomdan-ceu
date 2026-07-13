@@ -208,3 +208,68 @@ export async function adminSetActive(userId, isActive) {
 export function supabaseConfigured() {
   return !!SUPABASE_URL && !!SUPABASE_ANON;
 }
+
+// ============================================================
+// 이수증 사진 (Storage: ceu-receipts, 비공개, 본인 폴더만)
+// ============================================================
+const BUCKET = "ceu-receipts";
+
+// base64(data 부분) → 업로드. 성공 시 저장 경로(path) 반환
+export async function uploadReceipt(base64, mediaType) {
+  const me = currentUser();
+  if (!me) return { error: "로그인이 필요합니다." };
+  const t = accessToken();
+  if (!t) return { error: "로그인이 필요합니다." };
+  try {
+    // base64 → 바이너리(Blob)
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const ext = (mediaType && mediaType.includes("png")) ? "png" : "jpg";
+    const path = `${me.id}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${t}`, "Content-Type": mediaType || "image/jpeg" },
+      body: bytes,
+    });
+    if (!r.ok) { const e = await r.text(); return { error: "사진 저장 실패: " + e }; }
+    return { path };
+  } catch (e) {
+    return { error: "사진 처리 오류: " + e.message };
+  }
+}
+
+// 저장 경로 → 열람용 임시 서명 URL (비공개 버킷)
+export async function getReceiptUrl(path, expiresSec = 3600) {
+  if (!path) return { error: "경로 없음" };
+  const t = accessToken();
+  if (!t) return { error: "로그인이 필요합니다." };
+  try {
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${BUCKET}/${path}`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ expiresIn: expiresSec }),
+    });
+    if (!r.ok) { const e = await r.text(); return { error: "URL 생성 실패: " + e }; }
+    const data = await r.json();
+    return { url: `${SUPABASE_URL}/storage/v1${data.signedURL}` };
+  } catch (e) {
+    return { error: "URL 오류: " + e.message };
+  }
+}
+
+export async function deleteReceipt(path) {
+  if (!path) return { ok: true };
+  const t = accessToken();
+  if (!t) return { error: "로그인이 필요합니다." };
+  try {
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, {
+      method: "DELETE",
+      headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${t}` },
+    });
+    if (!r.ok) { const e = await r.text(); return { error: "삭제 실패: " + e }; }
+    return { ok: true };
+  } catch (e) {
+    return { error: "삭제 오류: " + e.message };
+  }
+}
