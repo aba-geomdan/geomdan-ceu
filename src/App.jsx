@@ -92,7 +92,7 @@ function blankCert(name) {
   const b = DEFAULT_CERTS[name];
   return { name, org: b.org, acquired: "2020-01-01", cycle: b.cycle, total: b.total, req: { ...b.req },
     note: b.note, src: b.src, firstExtra: b.firstExtra || null, training: b.training || null,
-    firstRenewal: false, trainingDone: false };
+    firstRenewal: false, trainingDone: false, history: [] };
 }
 function blankRecord() { return { id: uid(), title: "", date: todayISO(), appliesTo: {} }; }
 function sumForCert(records, name) {
@@ -124,7 +124,10 @@ function emptyData() {
 // 보유자격에 맞춰 certs 채우기(없는 건 생성, 있으면 유지)
 function ensureCerts(data) {
   const certs = { ...(data.certs || {}) };
-  (data.myCerts || []).forEach((n) => { if (!certs[n]) certs[n] = blankCert(n); });
+  (data.myCerts || []).forEach((n) => {
+    if (!certs[n]) certs[n] = blankCert(n);
+    else if (!Array.isArray(certs[n].history)) certs[n] = { ...certs[n], history: [] };
+  });
   return { ...data, certs, records: data.records || [] };
 }
 
@@ -211,6 +214,40 @@ export default function App() {
     persist({ ...data, records: nextRecords });
   };
 
+  // 갱신 완료 → 새 주기 시작 (이 자격에 인정된 이수증만 이력으로, 다른 자격은 그대로)
+  const startNewCycle = (name) => {
+    const cert = data.certs[name];
+    const renewal = addMonths(cert.acquired, cert.cycle);
+    // 이 자격에 인정된 이수증만 추림 → 스냅샷
+    const snapshotRecs = data.records
+      .filter((r) => r.appliesTo[name])
+      .map((r) => ({ title: r.title, date: r.date, hours: r.appliesTo[name].hours, cat: r.appliesTo[name].cat }));
+    const snapshot = {
+      id: uid(),
+      periodStart: cert.acquired,
+      periodEnd: renewal,
+      closedAt: todayISO(),
+      total: totalNeeded(cert),
+      records: snapshotRecs,
+    };
+    // records에서 이 자격 인정만 제거(다른 자격 인정은 유지). 이 자격 전용이면 record 자체 제거
+    const nextRecords = [];
+    data.records.forEach((r) => {
+      if (!r.appliesTo[name]) { nextRecords.push(r); return; }
+      const rest = { ...r.appliesTo };
+      delete rest[name];
+      if (Object.keys(rest).length > 0) nextRecords.push({ ...r, appliesTo: rest });
+      // 이 자격에만 인정되던 이수증은 버림(이력엔 이미 스냅샷으로 보존)
+    });
+    const newCert = {
+      ...cert,
+      acquired: renewal,            // 취득일 = 이번 갱신예정일
+      firstRenewal: false,          // 다음 주기는 첫 갱신 아님
+      history: [snapshot, ...(cert.history || [])],
+    };
+    persist({ ...data, certs: { ...data.certs, [name]: newCert }, records: nextRecords });
+  };
+
   const goDetail = (name) => { setActiveCert(name); setScreen("detail"); };
 
   if (booting) {
@@ -256,7 +293,8 @@ export default function App() {
               <Detail cert={data.certs[activeCert]} records={data.records}
                 onBack={() => setScreen("dashboard")}
                 onChangeCert={(patch) => updateCert(activeCert, patch)}
-                setRecords={setRecords} activeCert={activeCert} allMyCerts={data.myCerts} />
+                setRecords={setRecords} activeCert={activeCert} allMyCerts={data.myCerts}
+                onStartNewCycle={() => startNewCycle(activeCert)} />
             )}
             {screen === "settings" && (
               <Settings myCerts={data.myCerts} onSave={(picked) => finishPickCerts(picked)} />
@@ -603,7 +641,9 @@ function Dashboard({ me, data, onOpen }) {
 }
 
 /* ---------------- 자격별 상세 (이수증 관리) ---------------- */
-function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, allMyCerts }) {
+function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, allMyCerts, onStartNewCycle }) {
+  const [showHistory, setShowHistory] = useState(false);
+  const [confirmCycle, setConfirmCycle] = useState(false);
   const renewalDate = useMemo(() => addMonths(cert.acquired, cert.cycle), [cert.acquired, cert.cycle]);
   const dday = useMemo(() => daysBetween(renewalDate, todayISO()), [renewalDate]);
   const sums = useMemo(() => sumForCert(records, cert.name), [records, cert.name]);
@@ -708,6 +748,59 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
       </div>
 
       <RecordManager activeCert={activeCert} records={records} setRecords={setRecords} />
+
+      {/* 지난 주기 이력 */}
+      {cert.history && cert.history.length > 0 && (
+        <div className="card" style={{ padding: 20, marginTop: 16 }}>
+          <button onClick={() => setShowHistory((v) => !v)} style={{ width: "100%", background: "transparent", border: "none", display: "flex", justifyContent: "space-between", alignItems: "center", padding: 0 }}>
+            <span style={{ fontWeight: 800, fontSize: 15 }}>📚 지난 주기 이력 <span style={{ color: MUTE, fontWeight: 600, fontSize: 13 }}>({cert.history.length}개 주기)</span></span>
+            <span style={{ color: PKD, fontSize: 13, fontWeight: 700 }}>{showHistory ? "접기 ▲" : "펼치기 ▼"}</span>
+          </button>
+          {showHistory && (
+            <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 14 }}>
+              {cert.history.map((h) => {
+                const hsum = (h.records || []).reduce((a, r) => a + Number(r.hours || 0), 0);
+                return (
+                  <div key={h.id} style={{ border: `1px solid ${LINE}`, borderRadius: 12, padding: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13.5 }}>{fmtK(h.periodStart)} ~ {fmtK(h.periodEnd)}</div>
+                      <div style={{ fontSize: 12.5, color: MUTE }}>이수 {hsum}시간 · {(h.records || []).length}건 · 마감 {fmtK(h.closedAt)}</div>
+                    </div>
+                    {(h.records || []).length > 0 ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                        {h.records.map((r, i) => (
+                          <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, borderTop: i ? `1px solid ${LINE}` : "none", paddingTop: i ? 5 : 0 }}>
+                            <span style={{ minWidth: 0 }}>{r.title || "(제목 없음)"}</span>
+                            <span style={{ color: MUTE, flexShrink: 0 }}>{fmtK(r.date)} · {r.hours}h · {catLabel(r.cat)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : <div style={{ fontSize: 12.5, color: MUTE }}>이수증 없음</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 갱신 완료 → 새 주기 시작 */}
+      <div className="card" style={{ padding: 20, marginTop: 16, background: PKL, border: `1px solid ${LINE}` }}>
+        <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 4 }}>갱신을 완료하셨나요?</div>
+        <div style={{ fontSize: 12.5, color: MUTE, lineHeight: 1.6, marginBottom: 12 }}>
+          이 자격의 갱신을 마쳤다면 <b>새 주기 시작</b>을 누르세요. 현재 {cert.name} 이수증은 <b>지난 주기 이력</b>으로 보관되고,
+          취득일이 {fmtK(renewalDate)}로 갱신되며 새 주기는 0시간부터 시작됩니다. (다른 자격은 영향받지 않아요.)
+        </div>
+        {!confirmCycle ? (
+          <button className="btn btn-ghost" style={{ background: "#fff" }} onClick={() => setConfirmCycle(true)}>🔄 새 주기 시작</button>
+        ) : (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: PKD }}>{cert.name} 새 주기를 시작할까요?</span>
+            <button className="btn btn-pk" onClick={() => { onStartNewCycle(); setConfirmCycle(false); setShowHistory(true); }}>네, 시작</button>
+            <button className="btn btn-ghost" style={{ background: "#fff" }} onClick={() => setConfirmCycle(false)}>취소</button>
+          </div>
+        )}
+      </div>
     </>
   );
 }
@@ -740,8 +833,11 @@ function RecordManager({ activeCert, records, setRecords }) {
     .filter((r) => !query.trim() || (r.title || "").toLowerCase().includes(query.trim().toLowerCase()))
     .filter((r) => catFilter === "all" || (r.appliesTo[activeCert] && r.appliesTo[activeCert].cat === catFilter))
     .sort((a, b) => sortOrder === "new" ? (b.date || "").localeCompare(a.date || "") : (a.date || "").localeCompare(b.date || ""));
-  // 이 자격에서 실제 쓰이는 항목만 필터 옵션으로
-  const usableCats = catsFor({ firstRenewal: true, firstExtra: DEFAULT_CERTS[activeCert]?.firstExtra });
+  // 이 자격 이수증에 실제로 존재하는 항목만 필터 옵션으로
+  const usableCats = (() => {
+    const present = new Set(records.filter((r) => r.appliesTo[activeCert]).map((r) => r.appliesTo[activeCert].cat));
+    return CATS.filter((c) => present.has(c.key));
+  })();
 
   const onFile = async (file) => {
     if (!file) return;
@@ -754,9 +850,9 @@ function RecordManager({ activeCert, records, setRecords }) {
       });
       const media = file.type && file.type.startsWith("image/") ? file.type : "image/jpeg";
       const prompt = `이 이미지는 ABA 관련 연수·교육 이수증(CEU 증명서)입니다.
-자격증 후보: BCBA(BACB), ABAS-1(한국 KACBA), QBA(QABA), KBA(한국행동분석학회). 이수증에 인정 자격 문구가 있으면 그 자격들에 인정됩니다.
-다음 JSON만 출력(설명·코드블록 금지): {"title":"강의명","date":"YYYY-MM-DD","applies":[{"cert":"BCBA","hours":숫자,"cat":"ethics|superv|general"}]}
-- cat: 윤리=ethics, 수퍼비전=superv, 그 외=general. 인정 자격 못찾으면 applies는 빈 배열. 날짜는 YYYY-MM-DD.`;
+자격증 후보: BCBA(BACB), ABAS-1(한국 KACBA), QBA(QABA), QASP-S(QABA), KBA(한국행동분석학회). 이수증에 인정 자격 문구가 있으면 그 자격들에 인정됩니다.
+다음 JSON만 출력(설명·코드블록 금지): {"title":"강의명","date":"YYYY-MM-DD","applies":[{"cert":"BCBA","hours":숫자,"cat":"ethics|superv|general|trauma|comorbid"}]}
+- cat: 윤리=ethics, 수퍼비전=superv, 트라우마 케어/트라우마 기반 케어=trauma, 동반질환/다중진단=comorbid, 그 외=general. 인정 자격 못찾으면 applies는 빈 배열. 날짜는 YYYY-MM-DD.`;
       const resp = await fetch(CEU_RELAY_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${RELAY_KEY}` },
@@ -768,7 +864,7 @@ function RecordManager({ activeCert, records, setRecords }) {
       const o = JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
       const appliesTo = {};
       (Array.isArray(o.applies) ? o.applies : []).forEach((a) => {
-        if (CERT_NAMES.includes(a.cert)) appliesTo[a.cert] = { hours: Number(a.hours) || 0, cat: ["ethics", "superv", "general"].includes(a.cat) ? a.cat : "general" };
+        if (CERT_NAMES.includes(a.cert)) appliesTo[a.cert] = { hours: Number(a.hours) || 0, cat: ["ethics", "superv", "general", "trauma", "comorbid"].includes(a.cat) ? a.cat : "general" };
       });
       if (Object.keys(appliesTo).length === 0) appliesTo[activeCert] = { hours: 0, cat: "general" };
       // 이수증 원본 사진을 Storage에 저장(실패해도 인식 결과는 유지)
