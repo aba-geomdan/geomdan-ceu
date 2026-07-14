@@ -6,6 +6,20 @@ import {
   uploadReceipt, getReceiptUrl, deleteReceipt,
 } from "./supabase.js";
 
+(function domainGuard() {
+  try {
+    var h = window.location.hostname;
+    var ok = (h === "aba-geomdan.github.io" || h === "localhost" || h === "127.0.0.1" || h === "" || /\.local$/.test(h));
+    if (!ok) {
+      document.body.innerHTML =
+        '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;font-family:sans-serif;line-height:1.8;color:#D4728A;background:#FFF0F3;">접근할 수 없는 페이지<br/>검단ABA언어행동연구소의 지적재산입니다.</div>';
+      throw new Error("Unauthorized host");
+    }
+  } catch (e) {
+    if (e && e.message === "Unauthorized host") throw e;
+  }
+})();
+
 /* ============================================================
    ABA 자격증 갱신 연수시간 관리 (geomdan-ceu)
    Supabase Auth + RLS (A방식) · 이수증은 본인만 · 관리자는 계정만 관리
