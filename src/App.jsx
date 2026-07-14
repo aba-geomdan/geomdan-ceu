@@ -718,6 +718,9 @@ function RecordManager({ activeCert, records, setRecords }) {
   const [errMsg, setErrMsg] = useState("");
   const [review, setReview] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [query, setQuery] = useState("");
+  const [sortOrder, setSortOrder] = useState("new"); // new | old
+  const [catFilter, setCatFilter] = useState("all");
   const fileRef = useRef(null);
 
   const saveRecord = (rec) => setRecords((rs) => {
@@ -730,7 +733,15 @@ function RecordManager({ activeCert, records, setRecords }) {
     if (target && target.receiptPath) { deleteReceipt(target.receiptPath); }
     return rs.filter((r) => r.id !== id);
   });
-  const visible = records.filter((r) => r.appliesTo[activeCert]);
+
+  // 이 자격에 인정되는 이수증 → 검색·필터·정렬 적용
+  const visible = records
+    .filter((r) => r.appliesTo[activeCert])
+    .filter((r) => !query.trim() || (r.title || "").toLowerCase().includes(query.trim().toLowerCase()))
+    .filter((r) => catFilter === "all" || (r.appliesTo[activeCert] && r.appliesTo[activeCert].cat === catFilter))
+    .sort((a, b) => sortOrder === "new" ? (b.date || "").localeCompare(a.date || "") : (a.date || "").localeCompare(b.date || ""));
+  // 이 자격에서 실제 쓰이는 항목만 필터 옵션으로
+  const usableCats = catsFor({ firstRenewal: true, firstExtra: DEFAULT_CERTS[activeCert]?.firstExtra });
 
   const onFile = async (file) => {
     if (!file) return;
@@ -795,6 +806,20 @@ function RecordManager({ activeCert, records, setRecords }) {
       </div>
       <div style={{ fontSize: 12, color: MUTE, marginBottom: 14 }}>이수증 한 건이 여러 자격에 인정될 수 있어요. 인정되는 자격을 체크하면 각 자격에 자동 반영됩니다.</div>
 
+      {records.some((r) => r.appliesTo[activeCert]) && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+          <input className="inp" style={{ flex: "1 1 180px", padding: "8px 11px" }} placeholder="🔍 강의명 검색" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <select className="inp" style={{ width: "auto", padding: "8px 11px" }} value={sortOrder} onChange={(e) => setSortOrder(e.target.value)}>
+            <option value="new">최신순</option>
+            <option value="old">오래된순</option>
+          </select>
+          <select className="inp" style={{ width: "auto", padding: "8px 11px" }} value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
+            <option value="all">전체 항목</option>
+            {usableCats.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+          </select>
+        </div>
+      )}
+
       {busy && <div style={{ display: "flex", alignItems: "center", gap: 10, background: PKL, borderRadius: 10, padding: "10px 14px", marginBottom: 12, fontSize: 13, color: PKD }}>
         <span style={{ width: 16, height: 16, border: `2px solid ${PK}`, borderTopColor: "transparent", borderRadius: "50%", display: "inline-block", animation: "spin .8s linear infinite" }} />
         이수증을 읽어 강의명·날짜·시간·항목과 인정 자격을 확인하고 있어요…</div>}
@@ -802,9 +827,11 @@ function RecordManager({ activeCert, records, setRecords }) {
 
       {records.length === 0 ? (
         <div style={{ textAlign: "center", padding: "28px 0", color: MUTE, fontSize: 13.5 }}>아직 이수증이 없습니다. 직접 추가하거나 이수증을 인식해보세요.</div>
+      ) : visible.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "28px 0", color: MUTE, fontSize: 13.5 }}>조건에 맞는 이수증이 없습니다. 검색어나 필터를 바꿔보세요.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {records.map((r) => <RecordRow key={r.id} rec={r} activeCert={activeCert} onEdit={() => setEditing(r)} onDelete={() => delRecord(r.id)} />)}
+          {visible.map((r) => <RecordRow key={r.id} rec={r} activeCert={activeCert} onEdit={() => setEditing(r)} onDelete={() => delRecord(r.id)} />)}
         </div>
       )}
 
