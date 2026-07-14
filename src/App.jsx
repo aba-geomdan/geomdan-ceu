@@ -1,4 +1,3 @@
-// 재배포
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   restoreSession, login as sbLogin, logout as sbLogout, currentUser,
@@ -408,8 +407,39 @@ function Dashboard({ me, data, onOpen }) {
     return { n, cert, done, tot, pct, renewal, dday, lackTotal, lacks };
   });
 
+  // 갱신 임박(D-90 이내) 또는 기한 경과 자격 → 상단 배너
+  const alerts = cards
+    .filter((c) => c.dday !== null && c.dday <= 90)
+    .sort((a, b) => a.dday - b.dday);
+
   return (
     <>
+      {alerts.length > 0 && (
+        <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+          {alerts.map((c) => {
+            const overdue = c.dday < 0;
+            const done = c.lackTotal === 0 && c.lacks.every((l) => l.lack === 0);
+            const bg = overdue ? "#FDECEE" : "#FFF7EE";
+            const bd = overdue ? "#F5CDD3" : "#F5E3CC";
+            const col = overdue ? BAD : WARN;
+            return (
+              <button key={c.n} onClick={() => onOpen(c.n)} style={{ textAlign: "left", background: bg, border: `1px solid ${bd}`, borderRadius: 12, padding: "12px 15px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 18 }}>{overdue ? "🚨" : "⚠️"}</span>
+                <div style={{ marginRight: "auto", minWidth: 0 }}>
+                  <div style={{ fontWeight: 800, fontSize: 14.5, color: col }}>
+                    {c.n} 갱신 {overdue ? `기한 ${-c.dday}일 지남` : `D-${c.dday}`}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: MUTE, marginTop: 2 }}>
+                    갱신예정 {fmtK(c.renewal)} · {done ? "이수 완료 ✓ 갱신 신청만 하면 돼요" : `아직 ${c.lackTotal}시간 부족`}
+                  </div>
+                </div>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: col, flexShrink: 0 }}>바로가기 →</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div style={{ marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 800 }}>한눈에 보기</div>
