@@ -389,6 +389,85 @@ function Footer() {
 }
 
 
+/* ---------------- PDF 요약 (인쇄용 새 창) ---------------- */
+function printReport(me, data, cards) {
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[m]));
+  const today = fmtK(todayISO());
+
+  const certSections = cards.map((c) => {
+    const cert = c.cert;
+    const sums = sumForCert(data.records, cert.name);
+    const visibleCats = catsFor(cert);
+    const need = reqFor(cert);
+    const ddayTxt = c.dday == null ? "-" : (c.dday < 0 ? `기한 ${-c.dday}일 경과` : `D-${c.dday}`);
+    const catRows = visibleCats.map((cat) => {
+      const done = sums[cat.key] || 0, needH = Number(need[cat.key] || 0), met = done >= needH;
+      const isExtra = cert.firstExtra && cert.firstExtra[cat.key] != null;
+      return `<tr>
+        <td>${esc(cat.label)}${isExtra ? " <span style='color:#D4728A'>(첫 갱신)</span>" : ""}</td>
+        <td style="text-align:center">${done}h</td>
+        <td style="text-align:center">${needH > 0 ? needH + "h" : "-"}</td>
+        <td style="text-align:center;color:${met ? "#2E9E6B" : "#D4586A"}">${needH > 0 ? (met ? "충족" : "부족 " + Math.max(0, needH - done) + "h") : "요구없음"}</td>
+      </tr>`;
+    }).join("");
+    const recs = data.records.filter((r) => r.appliesTo[cert.name]);
+    const recRows = recs.length ? recs.map((r) => {
+      const a = r.appliesTo[cert.name];
+      return `<tr><td>${esc(r.title)}</td><td style="text-align:center">${esc(fmtK(r.date))}</td><td style="text-align:center">${a.hours}h</td><td style="text-align:center">${esc(catLabel(a.cat))}</td></tr>`;
+    }).join("") : `<tr><td colspan="4" style="text-align:center;color:#999">등록된 이수증 없음</td></tr>`;
+
+    return `
+      <div class="cert">
+        <div class="cert-head">
+          <div class="cert-name">${esc(cert.name)} <span class="cert-org">${esc(cert.org)}</span></div>
+          <div class="cert-dday">${esc(ddayTxt)}</div>
+        </div>
+        <div class="cert-meta">취득일 ${esc(fmtK(cert.acquired))} · 갱신주기 ${cert.cycle}개월 · 갱신예정 ${esc(fmtK(c.renewal))}${cert.firstRenewal ? " · <b>첫 갱신</b>" : ""}</div>
+        <div class="cert-total">전체 이수 <b>${c.done} / ${c.tot}시간</b> ${c.done >= c.tot ? "<span style='color:#2E9E6B'>(충족)</span>" : `<span style='color:#D4586A'>(${c.lackTotal}h 부족)</span>`}</div>
+        <table><thead><tr><th>항목</th><th>이수</th><th>요구</th><th>상태</th></tr></thead><tbody>${catRows}</tbody></table>
+        <div class="rec-title">이수증 목록 (${recs.length}건)</div>
+        <table><thead><tr><th>강의명</th><th>날짜</th><th>시간</th><th>항목</th></tr></thead><tbody>${recRows}</tbody></table>
+      </div>`;
+  }).join("");
+
+  const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>연수시간 현황 - ${esc(me.name)}</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { font-family: 'Malgun Gothic','Apple SD Gothic Neo',sans-serif; color: #3A2B30; padding: 32px; max-width: 800px; margin: 0 auto; }
+      .head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px solid #F5A0B1; padding-bottom: 14px; margin-bottom: 8px; }
+      .head h1 { font-size: 20px; margin: 0; }
+      .head .sub { font-size: 12px; color: #8A7A80; margin-top: 4px; }
+      .head .date { font-size: 12px; color: #8A7A80; }
+      .cert { margin-top: 24px; page-break-inside: avoid; border: 1px solid #F0DDE2; border-radius: 10px; padding: 16px; }
+      .cert-head { display: flex; justify-content: space-between; align-items: center; }
+      .cert-name { font-size: 17px; font-weight: 800; }
+      .cert-org { font-size: 12px; color: #8A7A80; font-weight: 500; }
+      .cert-dday { font-weight: 800; color: #D4728A; }
+      .cert-meta { font-size: 12px; color: #8A7A80; margin-top: 4px; }
+      .cert-total { font-size: 14px; margin: 10px 0; }
+      table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
+      th, td { border: 1px solid #F0DDE2; padding: 6px 9px; }
+      th { background: #FFF0F3; color: #D4728A; font-weight: 700; }
+      .rec-title { font-size: 13px; font-weight: 700; margin-top: 14px; color: #D4728A; }
+      .foot { margin-top: 28px; text-align: center; font-size: 11px; color: #8A7A80; border-top: 1px solid #F0DDE2; padding-top: 12px; }
+      @media print { body { padding: 0; } }
+    </style></head><body>
+    <div class="head">
+      <div><h1>자격증 갱신 연수시간(CEU) 현황</h1><div class="sub">${esc(me.name)} 선생님 · 검단ABA언어행동연구소</div></div>
+      <div class="date">출력일 ${esc(today)}</div>
+    </div>
+    ${certSections}
+    <div class="foot">${esc(COPYRIGHT)}</div>
+    <script>window.onload = function(){ setTimeout(function(){ window.print(); }, 300); };</script>
+    </body></html>`;
+
+  const w = window.open("", "_blank");
+  if (!w) { alert("팝업이 차단되었습니다. 팝업 허용 후 다시 시도해주세요."); return; }
+  w.document.write(html);
+  w.document.close();
+}
+
+/* ---------------- 대시보드 ---------------- */
 function Dashboard({ me, data, onOpen }) {
   const [showHelp, setShowHelp] = useState(true);
   const cards = me.myCerts.map((n) => {
@@ -445,9 +524,12 @@ function Dashboard({ me, data, onOpen }) {
           <div style={{ fontSize: 20, fontWeight: 800 }}>한눈에 보기</div>
           <div style={{ fontSize: 13, color: MUTE, marginTop: 3 }}>보유 자격의 이수 현황과 갱신까지 남은 기간이에요. <b style={{ color: PKD }}>카드를 누르면</b> 이수증 입력·관리 화면으로 이동합니다.</div>
         </div>
-        {!showHelp && (
-          <button onClick={() => setShowHelp(true)} className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12.5 }}>사용법 보기</button>
-        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => printReport(me, data, cards)} className="btn btn-pk" style={{ padding: "8px 14px", fontSize: 13 }}>📄 PDF 요약</button>
+          {!showHelp && (
+            <button onClick={() => setShowHelp(true)} className="btn btn-ghost" style={{ padding: "8px 12px", fontSize: 12.5 }}>사용법 보기</button>
+          )}
+        </div>
       </div>
 
       {showHelp && (
