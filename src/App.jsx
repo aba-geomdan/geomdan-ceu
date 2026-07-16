@@ -915,8 +915,8 @@ function BaselineHours({ cert, records, setRecords }) {
   const baseCats = catsFor(cert);
   const cats = CATS.filter((c) => baseCats.some((b) => b.key === c.key) || saved[c.key] != null);
   const hasBaseline = Object.keys(saved).length > 0;
-  // 이미 입력했으면 접힌 상태로 시작, 없으면 펼침
-  const [open, setOpen] = useState(!hasBaseline);
+  // 처음엔 항상 접힘 — 필요한 사람만 링크를 눌러 펼침
+  const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(() => {
     const d = {}; cats.forEach((c) => { d[c.key] = saved[c.key] != null ? saved[c.key] : ""; });
     return d;
@@ -925,22 +925,39 @@ function BaselineHours({ cert, records, setRecords }) {
   const total = cats.reduce((s, c) => s + (Number(draft[c.key]) || 0), 0);
 
   const save = () => {
-    let savedAny = false;
     setRecords((rs) => {
       // 이 자격의 기존 기초 record 전부 제거 후 새로 기록
       let next = rs.filter((r) => !(isBaselineRecord(r) && r.appliesTo[cert.name]));
       cats.forEach((c) => {
         const h = Number(draft[c.key]) || 0;
-        if (h > 0) { next.push({ id: baselineId(cert.name, c.key), title: BASELINE_TITLE, date: cert.acquired || todayISO(), appliesTo: { [cert.name]: { hours: h, cat: c.key } } }); savedAny = true; }
+        if (h > 0) next.push({ id: baselineId(cert.name, c.key), title: BASELINE_TITLE, date: cert.acquired || todayISO(), appliesTo: { [cert.name]: { hours: h, cat: c.key } } });
       });
       return next;
     });
-    // 실제로 저장된 기초 시간이 있을 때만 접는다
-    if (savedAny) setOpen(false);
+    // 저장하면 항상 접는다 (값이 0이면 다시 입력 링크로, 있으면 요약으로)
+    setOpen(false);
+  };
+
+  const cancel = () => {
+    // 저장 안 하고 닫으면 입력값을 저장된 값 기준으로 되돌림
+    const d = {}; cats.forEach((c) => { d[c.key] = saved[c.key] != null ? saved[c.key] : ""; });
+    setDraft(d);
+    setOpen(false);
   };
 
   if (!open) {
     const savedTotal = Object.values(saved).reduce((s, h) => s + (Number(h) || 0), 0);
+    // 기초값이 없으면 얇은 링크만, 있으면 요약 + 수정
+    if (!hasBaseline) {
+      return (
+        <div style={{ marginBottom: 16 }}>
+          <button className="btn btn-ghost" style={{ padding: "8px 12px", fontSize: 12.5, color: MUTE }} onClick={() => setOpen(true)}>
+            <i className="ti ti-history" aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: 6, color: PKD }} />
+            기초 이수시간 입력 <span style={{ color: MUTE }}>(중간부터 쓰는 경우)</span>
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="card" style={{ padding: "12px 16px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <div style={{ fontSize: 13, color: MUTE }}>
@@ -982,7 +999,7 @@ function BaselineHours({ cert, records, setRecords }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingTop: 12, borderTop: `1px solid ${LINE}` }}>
         <span style={{ fontSize: 12.5, color: MUTE }}>합계 <b style={{ color: PKD }}>{total}시간</b> 기초 반영</span>
         <div style={{ display: "flex", gap: 8 }}>
-          {hasBaseline && <button className="btn btn-ghost" style={{ padding: "7px 14px", fontSize: 13 }} onClick={() => setOpen(false)}>취소</button>}
+          <button className="btn btn-ghost" style={{ padding: "7px 14px", fontSize: 13 }} onClick={cancel}>취소</button>
           <button className="btn btn-pk" style={{ padding: "7px 16px", fontSize: 13 }} onClick={save}>저장</button>
         </div>
       </div>
@@ -1128,9 +1145,9 @@ function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
         </div>
       )}
 
-      {review && <RecordEditor title="인식 결과 확인" subtitle="AI가 읽은 내용이에요. 자격·시간·항목을 확인하고 저장하세요." certList={certList} certsMap={certsMap}
+      {review && <RecordEditor title="인식 결과 확인" subtitle="AI가 읽은 내용이에요. 자격·시간·항목을 확인하고 저장하세요." certList={certList} certsMap={certsMap} existingRecords={records}
         rec={review} onCancel={() => setReview(null)} onSave={(rec) => { saveRecord(rec); setReview(null); }} />}
-      {editing && <RecordEditor title={records.some((r) => r.id === editing.id) ? "이수증 편집" : "이수증 직접 추가"} certList={certList} certsMap={certsMap}
+      {editing && <RecordEditor title={records.some((r) => r.id === editing.id) ? "이수증 편집" : "이수증 직접 추가"} certList={certList} certsMap={certsMap} existingRecords={records}
         rec={editing} onCancel={() => setEditing(null)} onSave={(rec) => { saveRecord(rec); setEditing(null); }} />}
     </div>
   );
@@ -1174,7 +1191,7 @@ function RecordRow({ rec, activeCert, onEdit, onDelete }) {
   );
 }
 
-function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsMap }) {
+function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsMap, existingRecords }) {
   const names = (certList && certList.length) ? certList : CERT_NAMES;
   const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(rec)));
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
@@ -1187,6 +1204,37 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsM
   const setField = (name, f, v) => setDraft((d) => ({ ...d, appliesTo: { ...d.appliesTo, [name]: { ...d.appliesTo[name], [f]: v } } }));
   const anyCert = Object.keys(draft.appliesTo).length > 0;
 
+  // 이수증 날짜가 자격의 취득일(직전 갱신일)보다 이전이면 경고 (막지는 않음)
+  const preWarnings = Object.keys(draft.appliesTo)
+    .map((n) => {
+      const inst = certsMap && certsMap[n];
+      if (!inst || !inst.acquired || !draft.date) return null;
+      if (draft.date < inst.acquired) return { name: n, acquired: inst.acquired };
+      return null;
+    })
+    .filter(Boolean);
+
+  // 같은 강의명 + 같은 날짜의 이수증이 이미 있으면 중복 의심 (자기 자신 편집 제외, 기초 record 제외)
+  const norm = (s) => String(s || "").replace(/\s+/g, "").toLowerCase();
+  const dupRecords = (existingRecords || []).filter((r) =>
+    !isBaselineRecord(r) && r.id !== draft.id && draft.title.trim() &&
+    norm(r.title) === norm(draft.title) && (r.date || "") === (draft.date || "")
+  );
+  const isDup = dupRecords.length > 0;
+
+  const handleSave = () => {
+    if (isDup) {
+      const ok = window.confirm(`같은 강의명·날짜의 이수증이 이미 등록돼 있어요.\n\n· ${draft.title.trim()} (${fmtK(draft.date)})\n\n실수로 같은 이수증을 또 올린 게 아닌지 확인해 주세요. 그래도 추가할까요?`);
+      if (!ok) return;
+    }
+    if (preWarnings.length > 0) {
+      const lines = preWarnings.map((w) => `· ${w.name}: 취득일 ${fmtK(w.acquired)}`).join("\n");
+      const ok = window.confirm(`이수증 날짜(${fmtK(draft.date)})가 아래 자격의 현재 취득일(직전 갱신일)보다 이전이에요.\n\n${lines}\n\n지난 주기에 이수한 내역일 수 있어요. 그래도 이번 주기에 추가할까요?`);
+      if (!ok) return;
+    }
+    onSave(draft);
+  };
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,43,48,.45)", display: "grid", placeItems: "center", padding: 16, zIndex: 50 }} onClick={onCancel}>
       <div className="card" style={{ padding: 20, width: "100%", maxWidth: 480, maxHeight: "88vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
@@ -1196,6 +1244,19 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsM
           <input className="inp" value={draft.title} placeholder="예: 행동분석 윤리 워크숍" onChange={(e) => set({ title: e.target.value })} /></div>
         <div style={{ marginTop: 12 }}><label className="lbl">날짜</label>
           <input type="date" className="inp" value={draft.date} onChange={(e) => set({ date: e.target.value })} /></div>
+        {isDup && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: BAD, background: "#FDECEE", border: `1px solid #F5CDD3`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}>
+            ⚠ 같은 강의명·날짜의 이수증이 이미 등록돼 있어요. 실수로 같은 이수증을 또 올린 건 아닌지 확인해 주세요.
+          </div>
+        )}
+        {preWarnings.length > 0 && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: WARN, background: "#FFF7EE", border: `1px solid #F5E3CC`, borderRadius: 10, padding: "9px 12px", lineHeight: 1.5 }}>
+            ⚠ 이 날짜는 {preWarnings.map((w) => w.name).join(", ")}의 현재 취득일(직전 갱신일)보다 이전이에요. 지난 주기 이수 내역일 수 있어요.
+            <span style={{ display: "block", marginTop: 3, color: MUTE, fontSize: 11 }}>
+              {preWarnings.map((w) => `${w.name} 취득일 ${fmtK(w.acquired)}`).join(" · ")}
+            </span>
+          </div>
+        )}
         <div style={{ marginTop: 16 }}>
           <label className="lbl">인정되는 자격 (체크한 자격에만 반영)</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1233,7 +1294,7 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsM
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 18, justifyContent: "flex-end" }}>
           <button className="btn btn-ghost" onClick={onCancel}>취소</button>
-          <button className="btn btn-pk" disabled={!anyCert || !draft.title.trim()} style={{ opacity: !anyCert || !draft.title.trim() ? 0.5 : 1 }} onClick={() => onSave(draft)}>저장</button>
+          <button className="btn btn-pk" disabled={!anyCert || !draft.title.trim()} style={{ opacity: !anyCert || !draft.title.trim() ? 0.5 : 1 }} onClick={handleSave}>저장</button>
         </div>
         {!anyCert && <div style={{ fontSize: 12, color: BAD, marginTop: 8, textAlign: "right" }}>인정되는 자격을 최소 1개 체크하세요.</div>}
       </div>
