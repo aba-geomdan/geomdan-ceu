@@ -57,6 +57,14 @@ function catsFor(cert) {
   const extra = (cert.firstRenewal && cert.firstExtra) ? Object.keys(cert.firstExtra) : [];
   return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key));
 }
+// 표시·집계용 항목 목록: 위 항목 + 실제로 시간이 입력된 항목도 포함
+// (첫 갱신을 껐다 켜도 넣어둔 값이 사라지지 않게)
+function catsForWithData(cert, records) {
+  const base = ["ethics", "superv", "general"];
+  const extra = (cert.firstRenewal && cert.firstExtra) ? Object.keys(cert.firstExtra) : [];
+  const sums = sumForCert(records || [], cert.name);
+  return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key) || (sums[c.key] || 0) > 0);
+}
 
 const DEFAULT_CERTS = {
   BCBA: { org: "BACB", cycle: 24, total: 32, req: { ethics: 4, superv: 3, general: 0 },
@@ -83,14 +91,15 @@ const DEFAULT_CERTS = {
 const CERT_NAMES = Object.keys(DEFAULT_CERTS);
 
 const uid = () => Math.random().toString(36).slice(2, 9);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => { const d = new Date(); const y = d.getFullYear(), mo = String(d.getMonth() + 1).padStart(2, "0"), da = String(d.getDate()).padStart(2, "0"); return `${y}-${mo}-${da}`; };
 
 function addMonths(iso, m) {
   if (!iso) return "";
   const d = new Date(iso + "T00:00:00"); if (isNaN(d)) return "";
   const day = d.getDate(); d.setMonth(d.getMonth() + Number(m || 0));
   if (d.getDate() < day) d.setDate(0);
-  return d.toISOString().slice(0, 10);
+  const y = d.getFullYear(), mo = String(d.getMonth() + 1).padStart(2, "0"), da = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${da}`;
 }
 function daysBetween(a, b) {
   if (!a || !b) return null;
@@ -109,10 +118,88 @@ function blankCert(name) {
     firstRenewal: false, trainingDone: false, history: [] };
 }
 function blankRecord() { return { id: uid(), title: "", date: todayISO(), appliesTo: {} }; }
+
+// PDF → 첫 페이지 JPEG 변환용 (pdf.js를 CDN에서 1회 로드)
+let _pdfjsPromise = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (_pdfjsPromise) return _pdfjsPromise;
+  _pdfjsPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = () => {
+      try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; } catch (e) {}
+      resolve(window.pdfjsLib);
+    };
+    s.onerror = () => reject(new Error("PDF 처리 모듈을 불러오지 못했습니다."));
+    document.head.appendChild(s);
+  });
+  return _pdfjsPromise;
+}
+// PDF 파일 → 모든 페이지를 세로로 이어붙인 한 장의 JPEG base64(순수 데이터)로 반환
+async function pdfToStackedJpeg(file) {
+  const pdfjsLib = await loadPdfJs();
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const n = pdf.numPages;
+
+  // 1) 각 페이지를 개별 캔버스로 렌더
+  const pages = [];
+  let maxW = 0;
+  for (let i = 1; i <= n; i++) {
+    const page = await pdf.getPage(i);
+    const baseVp = page.getViewport({ scale: 1 });
+    const scale = Math.min(3, Math.max(1.5, 1600 / baseVp.width));
+    const vp = page.getViewport({ scale });
+    const c = document.createElement("canvas");
+    c.width = Math.floor(vp.width);
+    c.height = Math.floor(vp.height);
+    const cx = c.getContext("2d");
+    cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: cx, viewport: vp }).promise;
+    pages.push(c);
+    if (c.width > maxW) maxW = c.width;
+  }
+
+  // 2) 세로로 합치기 (Anthropic 이미지 한도 고려해 전체 높이 8000px로 제한)
+  const GAP = 12, MAX_H = 8000;
+  let totalH = pages.reduce((s, c) => s + c.height, 0) + GAP * (pages.length - 1);
+  let ratio = 1;
+  if (totalH > MAX_H) ratio = MAX_H / totalH;
+
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.floor(maxW * ratio));
+  out.height = Math.max(1, Math.floor(totalH * ratio));
+  const octx = out.getContext("2d");
+  octx.fillStyle = "#fff"; octx.fillRect(0, 0, out.width, out.height);
+  let y = 0;
+  for (const c of pages) {
+    const w = c.width * ratio, h = c.height * ratio;
+    octx.drawImage(c, 0, y, w, h);
+    y += h + GAP * ratio;
+  }
+  const dataUrl = out.toDataURL("image/jpeg", 0.85);
+  return dataUrl.split(",")[1];
+}
+
 function sumForCert(records, name) {
   const s = { ethics: 0, superv: 0, general: 0, trauma: 0, comorbid: 0 };
   records.forEach((r) => { const a = r.appliesTo[name]; if (a) s[a.cat] = (s[a.cat] || 0) + Number(a.hours || 0); });
   return s;
+}
+// 기초(중간부터 기록) 이수시간용 record 판별/집계
+const BASELINE_TITLE = "기초 이수시간 (이수증 없이 입력)";
+function isBaselineRecord(r) { return typeof r.id === "string" && r.id.indexOf("baseline::") === 0; }
+function baselineId(certName, cat) { return `baseline::${certName}::${cat}`; }
+// 특정 자격의 현재 기초 시간(항목별) 읽기
+function baselineHoursFor(records, certName) {
+  const out = {};
+  records.forEach((r) => {
+    if (!isBaselineRecord(r)) return;
+    const a = r.appliesTo[certName];
+    if (a) out[a.cat] = Number(a.hours || 0);
+  });
+  return out;
 }
 // 첫 갱신 여부 반영한 총 필요시간(추가 CEU 포함)
 function totalNeeded(cert) {
@@ -307,7 +394,7 @@ export default function App() {
               <Detail cert={data.certs[activeCert]} records={data.records}
                 onBack={() => setScreen("dashboard")}
                 onChangeCert={(patch) => updateCert(activeCert, patch)}
-                setRecords={setRecords} activeCert={activeCert} allMyCerts={data.myCerts}
+                setRecords={setRecords} activeCert={activeCert} allMyCerts={data.myCerts} certsMap={data.certs}
                 onStartNewCycle={() => startNewCycle(activeCert)} />
             )}
             {screen === "settings" && (
@@ -449,7 +536,7 @@ function printReport(me, data, cards) {
   const certSections = cards.map((c) => {
     const cert = c.cert;
     const sums = sumForCert(data.records, cert.name);
-    const visibleCats = catsFor(cert);
+    const visibleCats = catsForWithData(cert, data.records);
     const need = reqFor(cert);
     const ddayTxt = c.dday == null ? "-" : (c.dday < 0 ? `기한 ${-c.dday}일 경과` : `D-${c.dday}`);
     const catRows = visibleCats.map((cat) => {
@@ -527,8 +614,8 @@ function Dashboard({ me, data, onOpen }) {
     const sums = sumForCert(data.records, n);
     const need = reqFor(cert);
     const tot = totalNeeded(cert);
-    const visibleCats = catsFor(cert);
-    // 노출 항목의 합만 총 이수로 집계
+    const visibleCats = catsForWithData(cert, data.records);
+    // 노출 항목의 합만 총 이수로 집계 (값이 입력된 항목은 항상 포함)
     const done = visibleCats.reduce((acc, c) => acc + (sums[c.key] || 0), 0);
     const pct = tot ? Math.min(100, Math.round((done / tot) * 100)) : 0;
     const renewal = addMonths(cert.acquired, cert.cycle);
@@ -655,13 +742,13 @@ function Dashboard({ me, data, onOpen }) {
 }
 
 /* ---------------- 자격별 상세 (이수증 관리) ---------------- */
-function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, allMyCerts, onStartNewCycle }) {
+function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, allMyCerts, certsMap, onStartNewCycle }) {
   const [showHistory, setShowHistory] = useState(false);
   const [confirmCycle, setConfirmCycle] = useState(false);
   const renewalDate = useMemo(() => addMonths(cert.acquired, cert.cycle), [cert.acquired, cert.cycle]);
   const dday = useMemo(() => daysBetween(renewalDate, todayISO()), [renewalDate]);
   const sums = useMemo(() => sumForCert(records, cert.name), [records, cert.name]);
-  const visibleCats = catsFor(cert);
+  const visibleCats = catsForWithData(cert, records);
   const need = reqFor(cert);
   const tot = totalNeeded(cert);
   const totalDone = visibleCats.reduce((acc, c) => acc + (sums[c.key] || 0), 0);
@@ -761,7 +848,8 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
         </div>
       </div>
 
-      <RecordManager activeCert={activeCert} records={records} setRecords={setRecords} />
+      <BaselineHours key={cert.name + ":" + (cert.firstRenewal ? "1" : "0")} cert={cert} records={records} setRecords={setRecords} />
+      <RecordManager activeCert={activeCert} records={records} setRecords={setRecords} myCerts={allMyCerts} certsMap={certsMap} />
 
       {/* 지난 주기 이력 */}
       {cert.history && cert.history.length > 0 && (
@@ -819,8 +907,92 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
   );
 }
 
+/* ---------------- 기초 이수시간 (중간부터 기록) ---------------- */
+function BaselineHours({ cert, records, setRecords }) {
+  const saved = baselineHoursFor(records, cert.name);
+  // 입력 항목 = 현재 노출 항목 + 이미 기초값이 들어있는 항목
+  // (첫 갱신을 껐다 켜도 넣어둔 trauma/comorbid 기초값이 사라지지 않게)
+  const baseCats = catsFor(cert);
+  const cats = CATS.filter((c) => baseCats.some((b) => b.key === c.key) || saved[c.key] != null);
+  const hasBaseline = Object.keys(saved).length > 0;
+  // 이미 입력했으면 접힌 상태로 시작, 없으면 펼침
+  const [open, setOpen] = useState(!hasBaseline);
+  const [draft, setDraft] = useState(() => {
+    const d = {}; cats.forEach((c) => { d[c.key] = saved[c.key] != null ? saved[c.key] : ""; });
+    return d;
+  });
+
+  const total = cats.reduce((s, c) => s + (Number(draft[c.key]) || 0), 0);
+
+  const save = () => {
+    let savedAny = false;
+    setRecords((rs) => {
+      // 이 자격의 기존 기초 record 전부 제거 후 새로 기록
+      let next = rs.filter((r) => !(isBaselineRecord(r) && r.appliesTo[cert.name]));
+      cats.forEach((c) => {
+        const h = Number(draft[c.key]) || 0;
+        if (h > 0) { next.push({ id: baselineId(cert.name, c.key), title: BASELINE_TITLE, date: cert.acquired || todayISO(), appliesTo: { [cert.name]: { hours: h, cat: c.key } } }); savedAny = true; }
+      });
+      return next;
+    });
+    // 실제로 저장된 기초 시간이 있을 때만 접는다
+    if (savedAny) setOpen(false);
+  };
+
+  if (!open) {
+    const savedTotal = Object.values(saved).reduce((s, h) => s + (Number(h) || 0), 0);
+    return (
+      <div className="card" style={{ padding: "12px 16px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ fontSize: 13, color: MUTE }}>
+          <i className="ti ti-history" aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: 6, color: PKD }} />
+          기초 이수시간 <b style={{ color: PKD }}>{savedTotal}시간</b> 반영됨
+        </div>
+        <button className="btn btn-ghost" style={{ padding: "6px 12px", fontSize: 12.5 }} onClick={() => setOpen(true)}>수정</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card" style={{ padding: 18, marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <i className="ti ti-history" aria-hidden="true" style={{ color: PKD, fontSize: 18 }} />
+        <span style={{ fontWeight: 800, fontSize: 15 }}>기초 이수시간</span>
+      </div>
+      <div style={{ fontSize: 12.5, color: MUTE, marginBottom: 14, lineHeight: 1.6 }}>
+        앱을 중간부터 쓰는 경우, 이미 이수한 시간을 이수증 없이 한번에 넣을 수 있어요. 이후 이수증을 추가하면 그 위에 더해집니다. (첫 기록이라 넣을 게 없으면 그냥 저장하지 말고 아래 이수증부터 등록하세요.)
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {cats.map((c) => {
+          const isExtra = cert.firstExtra && cert.firstExtra[c.key] != null;
+          return (
+            <div key={c.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <span style={{ fontSize: 13, color: INK }}>{c.label}{isExtra ? " (첫 갱신)" : ""}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input type="number" className="inp" style={{ width: 90, textAlign: "right", padding: "6px 9px" }} min="0"
+                  value={draft[c.key]} placeholder="0"
+                  onChange={(e) => setDraft((d) => ({ ...d, [c.key]: e.target.value }))} />
+                <span style={{ fontSize: 12.5, color: MUTE, minWidth: 22 }}>시간</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingTop: 12, borderTop: `1px solid ${LINE}` }}>
+        <span style={{ fontSize: 12.5, color: MUTE }}>합계 <b style={{ color: PKD }}>{total}시간</b> 기초 반영</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          {hasBaseline && <button className="btn btn-ghost" style={{ padding: "7px 14px", fontSize: 13 }} onClick={() => setOpen(false)}>취소</button>}
+          <button className="btn btn-pk" style={{ padding: "7px 16px", fontSize: 13 }} onClick={save}>저장</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- 이수증 관리 ---------------- */
-function RecordManager({ activeCert, records, setRecords }) {
+function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
+  const certList = (myCerts && myCerts.length) ? CERT_NAMES.filter((n) => myCerts.includes(n)) : CERT_NAMES;
   const [busy, setBusy] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   const [review, setReview] = useState(null);
@@ -841,15 +1013,15 @@ function RecordManager({ activeCert, records, setRecords }) {
     return rs.filter((r) => r.id !== id);
   });
 
-  // 이 자격에 인정되는 이수증 → 검색·필터·정렬 적용
+  // 이 자격에 인정되는 이수증 → 검색·필터·정렬 적용 (기초 시간 record는 목록에서 제외)
   const visible = records
-    .filter((r) => r.appliesTo[activeCert])
+    .filter((r) => r.appliesTo[activeCert] && !isBaselineRecord(r))
     .filter((r) => !query.trim() || (r.title || "").toLowerCase().includes(query.trim().toLowerCase()))
     .filter((r) => catFilter === "all" || (r.appliesTo[activeCert] && r.appliesTo[activeCert].cat === catFilter))
     .sort((a, b) => sortOrder === "new" ? (b.date || "").localeCompare(a.date || "") : (a.date || "").localeCompare(b.date || ""));
   // 이 자격 이수증에 실제로 존재하는 항목만 필터 옵션으로
   const usableCats = (() => {
-    const present = new Set(records.filter((r) => r.appliesTo[activeCert]).map((r) => r.appliesTo[activeCert].cat));
+    const present = new Set(records.filter((r) => r.appliesTo[activeCert] && !isBaselineRecord(r)).map((r) => r.appliesTo[activeCert].cat));
     return CATS.filter((c) => present.has(c.key));
   })();
 
@@ -857,12 +1029,20 @@ function RecordManager({ activeCert, records, setRecords }) {
     if (!file) return;
     setErrMsg(""); setBusy(true);
     try {
-      const b64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(",")[1]);
-        r.onerror = () => rej(new Error("파일을 읽지 못했습니다")); r.readAsDataURL(file);
-      });
-      const media = file.type && file.type.startsWith("image/") ? file.type : "image/jpeg";
+      const isPdf = (file.type === "application/pdf") || /\.pdf$/i.test(file.name || "");
+      let b64, media;
+      if (isPdf) {
+        // PDF는 전체 페이지를 한 장의 이미지로 합쳐서 기존 이미지 인식 경로로 처리
+        b64 = await pdfToStackedJpeg(file);
+        media = "image/jpeg";
+      } else {
+        b64 = await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => res(String(r.result).split(",")[1]);
+          r.onerror = () => rej(new Error("파일을 읽지 못했습니다")); r.readAsDataURL(file);
+        });
+        media = file.type && file.type.startsWith("image/") ? file.type : "image/jpeg";
+      }
       const prompt = `이 이미지는 ABA 관련 연수·교육 이수증(CEU 증명서)입니다.
 자격증 후보: BCBA(BACB), ABAS-1(한국 KACBA), QBA(QABA), QASP-S(QABA), KBA(한국행동분석학회). 이수증에 인정 자격 문구가 있으면 그 자격들에 인정됩니다.
 다음 JSON만 출력(설명·코드블록 금지): {"title":"강의명","date":"YYYY-MM-DD","applies":[{"cert":"BCBA","hours":숫자,"cat":"ethics|superv|general|trauma|comorbid"}]}
@@ -878,7 +1058,7 @@ function RecordManager({ activeCert, records, setRecords }) {
       const o = JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
       const appliesTo = {};
       (Array.isArray(o.applies) ? o.applies : []).forEach((a) => {
-        if (CERT_NAMES.includes(a.cert)) appliesTo[a.cert] = { hours: Number(a.hours) || 0, cat: ["ethics", "superv", "general", "trauma", "comorbid"].includes(a.cat) ? a.cat : "general" };
+        if (certList.includes(a.cert)) appliesTo[a.cert] = { hours: Number(a.hours) || 0, cat: ["ethics", "superv", "general", "trauma", "comorbid"].includes(a.cat) ? a.cat : "general" };
       });
       if (Object.keys(appliesTo).length === 0) appliesTo[activeCert] = { hours: 0, cat: "general" };
       // 이수증 원본 사진을 Storage에 저장(실패해도 인식 결과는 유지)
@@ -893,7 +1073,7 @@ function RecordManager({ activeCert, records, setRecords }) {
 
   const exportCSV = () => {
     const rows = [["강의명", "날짜", ...CERT_NAMES.flatMap((n) => [`${n} 시간`, `${n} 항목`])]];
-    records.forEach((r) => {
+    records.filter((r) => !isBaselineRecord(r)).forEach((r) => {
       const row = [r.title, r.date];
       CERT_NAMES.forEach((n) => { const a = r.appliesTo[n]; row.push(a ? a.hours : "", a ? catLabel(a.cat) : ""); });
       rows.push(row);
@@ -903,20 +1083,23 @@ function RecordManager({ activeCert, records, setRecords }) {
     const a = document.createElement("a"); a.href = url; a.download = "이수증_전체.csv"; a.click(); URL.revokeObjectURL(url);
   };
 
+  // 기초 record를 뺀 실제 이수증(개수·빈 상태 판단용)
+  const realRecords = records.filter((r) => !isBaselineRecord(r));
+
   return (
     <div className="card" style={{ padding: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 6 }}>
-        <div style={{ fontWeight: 800, fontSize: 16 }}>이수증 <span style={{ color: MUTE, fontWeight: 600, fontSize: 13 }}>· {activeCert} 인정 {visible.length}건 / 전체 {records.length}건</span></div>
+        <div style={{ fontWeight: 800, fontSize: 16 }}>이수증 <span style={{ color: MUTE, fontWeight: 600, fontSize: 13 }}>· {activeCert} 인정 {visible.length}건 / 전체 {realRecords.length}건</span></div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy}>{busy ? "인식 중…" : "📷 이수증 인식"}</button>
+          <button className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy}>{busy ? "인식 중…" : "📷 이수증 인식 (사진·PDF)"}</button>
           <button className="btn btn-ghost" onClick={() => setEditing(blankRecord())}>+ 직접 추가</button>
-          <button className="btn btn-ghost" onClick={exportCSV} disabled={!records.length}>엑셀(CSV)</button>
+          <button className="btn btn-ghost" onClick={exportCSV} disabled={!realRecords.length}>엑셀(CSV)</button>
         </div>
-        <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => onFile(e.target.files?.[0])} />
+        <input ref={fileRef} type="file" accept="image/*,application/pdf,.pdf" style={{ display: "none" }} onChange={(e) => onFile(e.target.files?.[0])} />
       </div>
       <div style={{ fontSize: 12, color: MUTE, marginBottom: 14 }}>이수증 한 건이 여러 자격에 인정될 수 있어요. 인정되는 자격을 체크하면 각 자격에 자동 반영됩니다.</div>
 
-      {records.some((r) => r.appliesTo[activeCert]) && (
+      {realRecords.some((r) => r.appliesTo[activeCert]) && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
           <input className="inp" style={{ flex: "1 1 180px", padding: "8px 11px" }} placeholder="🔍 강의명 검색" value={query} onChange={(e) => setQuery(e.target.value)} />
           <select className="inp" style={{ width: "auto", padding: "8px 11px" }} value={sortOrder} onChange={(e) => setSortOrder(e.target.value)}>
@@ -935,7 +1118,7 @@ function RecordManager({ activeCert, records, setRecords }) {
         이수증을 읽어 강의명·날짜·시간·항목과 인정 자격을 확인하고 있어요…</div>}
       {errMsg && <div style={{ background: "#FDECEE", border: `1px solid #F5CDD3`, color: BAD, borderRadius: 10, padding: "10px 14px", marginBottom: 12, fontSize: 13 }}>{errMsg}</div>}
 
-      {records.length === 0 ? (
+      {realRecords.length === 0 ? (
         <div style={{ textAlign: "center", padding: "28px 0", color: MUTE, fontSize: 13.5 }}>아직 이수증이 없습니다. 직접 추가하거나 이수증을 인식해보세요.</div>
       ) : visible.length === 0 ? (
         <div style={{ textAlign: "center", padding: "28px 0", color: MUTE, fontSize: 13.5 }}>조건에 맞는 이수증이 없습니다. 검색어나 필터를 바꿔보세요.</div>
@@ -945,9 +1128,9 @@ function RecordManager({ activeCert, records, setRecords }) {
         </div>
       )}
 
-      {review && <RecordEditor title="인식 결과 확인" subtitle="AI가 읽은 내용이에요. 자격·시간·항목을 확인하고 저장하세요."
+      {review && <RecordEditor title="인식 결과 확인" subtitle="AI가 읽은 내용이에요. 자격·시간·항목을 확인하고 저장하세요." certList={certList} certsMap={certsMap}
         rec={review} onCancel={() => setReview(null)} onSave={(rec) => { saveRecord(rec); setReview(null); }} />}
-      {editing && <RecordEditor title={records.some((r) => r.id === editing.id) ? "이수증 편집" : "이수증 직접 추가"}
+      {editing && <RecordEditor title={records.some((r) => r.id === editing.id) ? "이수증 편집" : "이수증 직접 추가"} certList={certList} certsMap={certsMap}
         rec={editing} onCancel={() => setEditing(null)} onSave={(rec) => { saveRecord(rec); setEditing(null); }} />}
     </div>
   );
@@ -991,7 +1174,8 @@ function RecordRow({ rec, activeCert, onEdit, onDelete }) {
   );
 }
 
-function RecordEditor({ title, subtitle, rec, onCancel, onSave }) {
+function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsMap }) {
+  const names = (certList && certList.length) ? certList : CERT_NAMES;
   const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(rec)));
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
   const toggleCert = (name) => setDraft((d) => {
@@ -1015,7 +1199,7 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave }) {
         <div style={{ marginTop: 16 }}>
           <label className="lbl">인정되는 자격 (체크한 자격에만 반영)</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {CERT_NAMES.map((n) => {
+            {names.map((n) => {
               const on = !!draft.appliesTo[n];
               return (
                 <div key={n} style={{ border: `1px solid ${on ? PK : LINE}`, borderRadius: 11, padding: on ? "10px 12px" : "8px 12px", background: on ? PKL : "#fff" }}>
@@ -1031,9 +1215,13 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave }) {
                         <select className="inp" style={{ padding: "6px 9px" }} value={draft.appliesTo[n].cat} onChange={(e) => setField(n, "cat", e.target.value)}>
                           {(() => {
                             const base = ["ethics", "superv", "general"];
-                            const extra = DEFAULT_CERTS[n] && DEFAULT_CERTS[n].firstExtra ? Object.keys(DEFAULT_CERTS[n].firstExtra) : [];
-                            return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key))
-                              .map((c) => <option key={c.key} value={c.key}>{c.label}{extra.includes(c.key) ? " (첫 갱신)" : ""}</option>);
+                            const inst = certsMap && certsMap[n];
+                            // 실제 자격의 첫 갱신 상태일 때만 추가 항목 노출
+                            const extraAll = (inst && inst.firstExtra) ? Object.keys(inst.firstExtra) : (DEFAULT_CERTS[n] && DEFAULT_CERTS[n].firstExtra ? Object.keys(DEFAULT_CERTS[n].firstExtra) : []);
+                            const extra = (inst && inst.firstRenewal) ? extraAll : [];
+                            const cur = draft.appliesTo[n].cat; // 이미 선택된 항목은 항상 보이게
+                            return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key) || c.key === cur)
+                              .map((c) => <option key={c.key} value={c.key}>{c.label}{extraAll.includes(c.key) ? " (첫 갱신)" : ""}</option>);
                           })()}
                         </select></div>
                     </div>
