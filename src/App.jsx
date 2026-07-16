@@ -680,7 +680,7 @@ function Dashboard({ me, data, onOpen }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 12 }}>
             {[
               ["① 자격 카드 열기", "가진 자격 카드를 누르면 상세 화면에서 이수증을 넣고 관리할 수 있어요."],
-              ["② 이수증 인식", "이수증 사진을 올리면 강의명·날짜·시간·항목과 인정 자격을 자동으로 읽어줘요. 확인 후 저장하면 끝."],
+              ["② 이수증 인식", "이수증 사진이나 PDF를 올리면 강의명·날짜·시간·항목과 인정 자격을 자동으로 읽어줘요. 확인 후 저장하면 끝."],
               ["③ 하나로 여러 자격", "이수증 한 건이 BCBA·QBA처럼 여러 자격에 인정되면 한 번만 등록해도 각 자격에 함께 반영돼요."],
               ["④ 부족분·D-day 확인", "각 카드에서 남은 시간, 항목별 부족분, 갱신까지 남은 날짜(D-day)를 한눈에 볼 수 있어요."],
             ].map(([t, d]) => (
@@ -976,7 +976,7 @@ function BaselineHours({ cert, records, setRecords }) {
         <span style={{ fontWeight: 800, fontSize: 15 }}>기초 이수시간</span>
       </div>
       <div style={{ fontSize: 12.5, color: MUTE, marginBottom: 14, lineHeight: 1.6 }}>
-        앱을 중간부터 쓰는 경우, 이미 이수한 시간을 이수증 없이 한번에 넣을 수 있어요. 이후 이수증을 추가하면 그 위에 더해집니다. (첫 기록이라 넣을 게 없으면 그냥 저장하지 말고 아래 이수증부터 등록하세요.)
+        앱을 중간부터 쓰는 경우, 이미 이수한 시간을 이수증 없이 한번에 넣을 수 있어요. 이후 이수증을 추가하면 그 위에 더해집니다. 넣을 게 없으면 취소를 눌러 닫으세요.
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
