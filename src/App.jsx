@@ -182,9 +182,28 @@ async function pdfToStackedJpeg(file) {
   return dataUrl.split(",")[1];
 }
 
+// 한 이수증의 한 자격 인정분을 항목별 줄로 (예: 일반 3 + 윤리 1)
+// 줄이 하나면 예전과 같은 {hours, cat} 모양, 여러 줄이면 {hours: 합계, cat: 첫 항목, parts: [...]}
+function partsOf(a) {
+  if (!a) return [];
+  if (Array.isArray(a.parts) && a.parts.length) return a.parts.map((p) => ({ hours: p.hours, cat: p.cat }));
+  return [{ hours: a.hours, cat: a.cat }];
+}
+function fromParts(parts) {
+  const p = parts.map((x) => ({ hours: Number(x.hours) || 0, cat: x.cat }));
+  if (p.length <= 1) return { hours: p[0] ? p[0].hours : 0, cat: p[0] ? p[0].cat : "general" };
+  const total = Math.round(p.reduce((acc, x) => acc + x.hours, 0) * 100) / 100;
+  return { hours: total, cat: p[0].cat, parts: p };
+}
+function isSplit(a) { return !!(a && Array.isArray(a.parts) && a.parts.length > 1); }
+function partsLabel(a) { return partsOf(a).map((x) => `${catLabel(x.cat)} ${x.hours}h`).join(" · "); }
+
 function sumForCert(records, name) {
   const s = { ethics: 0, superv: 0, general: 0, trauma: 0, comorbid: 0 };
-  records.forEach((r) => { const a = r.appliesTo[name]; if (a) s[a.cat] = (s[a.cat] || 0) + Number(a.hours || 0); });
+  records.forEach((r) => {
+    const a = r.appliesTo[name];
+    if (a) partsOf(a).forEach((x) => { s[x.cat] = (s[x.cat] || 0) + Number(x.hours || 0); });
+  });
   return s;
 }
 // 기초(중간부터 기록) 이수시간용 record 판별/집계
@@ -322,7 +341,7 @@ export default function App() {
     // 이 자격에 인정된 이수증만 추림 → 스냅샷
     const snapshotRecs = data.records
       .filter((r) => r.appliesTo[name])
-      .map((r) => ({ title: r.title, date: r.date, hours: r.appliesTo[name].hours, cat: r.appliesTo[name].cat }));
+      .map((r) => ({ title: r.title, date: r.date, hours: r.appliesTo[name].hours, cat: r.appliesTo[name].cat, ...(isSplit(r.appliesTo[name]) ? { parts: r.appliesTo[name].parts } : {}) }));
     const snapshot = {
       id: uid(),
       periodStart: cert.acquired,
@@ -552,7 +571,7 @@ function printReport(me, data, cards) {
     const recs = data.records.filter((r) => r.appliesTo[cert.name]);
     const recRows = recs.length ? recs.map((r) => {
       const a = r.appliesTo[cert.name];
-      return `<tr><td>${esc(r.title)}</td><td style="text-align:center">${esc(fmtK(r.date))}</td><td style="text-align:center">${a.hours}h</td><td style="text-align:center">${esc(catLabel(a.cat))}</td></tr>`;
+      return `<tr><td>${esc(r.title)}</td><td style="text-align:center">${esc(fmtK(r.date))}</td><td style="text-align:center">${a.hours}h</td><td style="text-align:center">${esc(isSplit(a) ? partsLabel(a) : catLabel(a.cat))}</td></tr>`;
     }).join("") : `<tr><td colspan="4" style="text-align:center;color:#999">등록된 이수증 없음</td></tr>`;
 
     return `
@@ -873,7 +892,7 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
                         {h.records.map((r, i) => (
                           <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, borderTop: i ? `1px solid ${LINE}` : "none", paddingTop: i ? 5 : 0 }}>
                             <span style={{ minWidth: 0 }}>{r.title || "(제목 없음)"}</span>
-                            <span style={{ color: MUTE, flexShrink: 0 }}>{fmtK(r.date)} · {r.hours}h · {catLabel(r.cat)}</span>
+                            <span style={{ color: MUTE, flexShrink: 0 }}>{fmtK(r.date)} · {r.hours}h · {isSplit(r) ? partsLabel(r) : catLabel(r.cat)}</span>
                           </div>
                         ))}
                       </div>
@@ -1034,11 +1053,11 @@ function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
   const visible = records
     .filter((r) => r.appliesTo[activeCert] && !isBaselineRecord(r))
     .filter((r) => !query.trim() || (r.title || "").toLowerCase().includes(query.trim().toLowerCase()))
-    .filter((r) => catFilter === "all" || (r.appliesTo[activeCert] && r.appliesTo[activeCert].cat === catFilter))
+    .filter((r) => catFilter === "all" || (r.appliesTo[activeCert] && partsOf(r.appliesTo[activeCert]).some((x) => x.cat === catFilter)))
     .sort((a, b) => sortOrder === "new" ? (b.date || "").localeCompare(a.date || "") : (a.date || "").localeCompare(b.date || ""));
   // 이 자격 이수증에 실제로 존재하는 항목만 필터 옵션으로
   const usableCats = (() => {
-    const present = new Set(records.filter((r) => r.appliesTo[activeCert] && !isBaselineRecord(r)).map((r) => r.appliesTo[activeCert].cat));
+    const present = new Set(records.filter((r) => r.appliesTo[activeCert] && !isBaselineRecord(r)).flatMap((r) => partsOf(r.appliesTo[activeCert]).map((x) => x.cat)));
     return CATS.filter((c) => present.has(c.key));
   })();
 
@@ -1063,6 +1082,7 @@ function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
       const prompt = `이 이미지는 ABA 관련 연수·교육 이수증(CEU 증명서)입니다.
 자격증 후보: BCBA(BACB), ABAS-1(한국 KACBA), QBA(QABA), QASP-S(QABA), KBA(한국행동분석학회). 이수증에 인정 자격 문구가 있으면 그 자격들에 인정됩니다.
 다음 JSON만 출력(설명·코드블록 금지): {"title":"강의명","date":"YYYY-MM-DD","applies":[{"cert":"BCBA","hours":숫자,"cat":"ethics|superv|general|trauma|comorbid"}]}
+- 같은 자격이라도 윤리·일반처럼 항목별 시간이 나뉘어 있으면 항목마다 applies에 따로 넣으세요(예: QBA 일반 3, QBA 윤리 1).
 - cat: 윤리=ethics, 수퍼비전=superv, 트라우마 케어/트라우마 기반 케어=trauma, 동반질환/다중진단=comorbid, 그 외=general. 인정 자격 못찾으면 applies는 빈 배열. 날짜는 YYYY-MM-DD.`;
       const resp = await fetch(CEU_RELAY_URL, {
         method: "POST",
@@ -1075,7 +1095,13 @@ function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
       const o = JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
       const appliesTo = {};
       (Array.isArray(o.applies) ? o.applies : []).forEach((a) => {
-        if (certList.includes(a.cert)) appliesTo[a.cert] = { hours: Number(a.hours) || 0, cat: ["ethics", "superv", "general", "trauma", "comorbid"].includes(a.cat) ? a.cat : "general" };
+        if (!certList.includes(a.cert)) return;
+        const cat = ["ethics", "superv", "general", "trauma", "comorbid"].includes(a.cat) ? a.cat : "general";
+        const h = Number(a.hours) || 0;
+        const parts = appliesTo[a.cert] ? partsOf(appliesTo[a.cert]) : [];
+        const same = parts.find((x) => x.cat === cat);
+        if (same) same.hours = (Number(same.hours) || 0) + h; else parts.push({ hours: h, cat });
+        appliesTo[a.cert] = fromParts(parts);
       });
       if (Object.keys(appliesTo).length === 0) appliesTo[activeCert] = { hours: 0, cat: "general" };
       // 이수증 원본 사진을 Storage에 저장(실패해도 인식 결과는 유지)
@@ -1092,7 +1118,7 @@ function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
     const rows = [["강의명", "날짜", ...CERT_NAMES.flatMap((n) => [`${n} 시간`, `${n} 항목`])]];
     records.filter((r) => !isBaselineRecord(r)).forEach((r) => {
       const row = [r.title, r.date];
-      CERT_NAMES.forEach((n) => { const a = r.appliesTo[n]; row.push(a ? a.hours : "", a ? catLabel(a.cat) : ""); });
+      CERT_NAMES.forEach((n) => { const a = r.appliesTo[n]; row.push(a ? a.hours : "", a ? (isSplit(a) ? partsLabel(a) : catLabel(a.cat)) : ""); });
       rows.push(row);
     });
     const csv = "\uFEFF" + rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -1184,7 +1210,7 @@ function RecordRow({ rec, activeCert, onEdit, onDelete }) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
         {list.map((n) => {
           const a = rec.appliesTo[n], on = n === activeCert;
-          return <span key={n} style={{ fontSize: 12, fontWeight: 700, borderRadius: 999, padding: "3px 10px", background: on ? PK : PKL, color: on ? "#fff" : PKD, border: `1px solid ${on ? PK : LINE}` }}>{n} · {a.hours}h · {catLabel(a.cat)}</span>;
+          return <span key={n} style={{ fontSize: 12, fontWeight: 700, borderRadius: 999, padding: "3px 10px", background: on ? PK : PKL, color: on ? "#fff" : PKD, border: `1px solid ${on ? PK : LINE}` }}>{n} · {isSplit(a) ? partsLabel(a) : `${a.hours}h · ${catLabel(a.cat)}`}</span>;
         })}
       </div>
     </div>
@@ -1198,10 +1224,35 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsM
   const toggleCert = (name) => setDraft((d) => {
     const a = { ...d.appliesTo };
     if (a[name]) delete a[name];
-    else { const ex = Object.values(a)[0]; a[name] = ex ? { hours: ex.hours, cat: ex.cat } : { hours: 0, cat: "general" }; }
+    else { const ex = Object.values(a)[0]; a[name] = ex ? fromParts(partsOf(ex)) : { hours: 0, cat: "general" }; }
     return { ...d, appliesTo: a };
   });
-  const setField = (name, f, v) => setDraft((d) => ({ ...d, appliesTo: { ...d.appliesTo, [name]: { ...d.appliesTo[name], [f]: v } } }));
+  // 항목 줄(시간·항목) 편집 / 추가 / 삭제
+  const setPart = (name, i, f, v) => setDraft((d) => {
+    const parts = partsOf(d.appliesTo[name]);
+    parts[i] = { ...parts[i], [f]: v };
+    return { ...d, appliesTo: { ...d.appliesTo, [name]: fromParts(parts) } };
+  });
+  const addPart = (name) => setDraft((d) => {
+    const parts = partsOf(d.appliesTo[name]);
+    const used = parts.map((x) => x.cat);
+    const next = catOptionsFor(name, null).find((c) => !used.includes(c.key));
+    parts.push({ hours: 0, cat: next ? next.key : "general" });
+    return { ...d, appliesTo: { ...d.appliesTo, [name]: fromParts(parts) } };
+  });
+  const removePart = (name, i) => setDraft((d) => {
+    const parts = partsOf(d.appliesTo[name]).filter((_, j) => j !== i);
+    return { ...d, appliesTo: { ...d.appliesTo, [name]: fromParts(parts) } };
+  });
+  // 자격별 항목 선택지 (기존 규칙 그대로: 첫 갱신 상태일 때만 추가 항목, 이미 고른 항목은 항상 보임)
+  const catOptionsFor = (n, cur) => {
+    const base = ["ethics", "superv", "general"];
+    const inst = certsMap && certsMap[n];
+    const extraAll = (inst && inst.firstExtra) ? Object.keys(inst.firstExtra) : (DEFAULT_CERTS[n] && DEFAULT_CERTS[n].firstExtra ? Object.keys(DEFAULT_CERTS[n].firstExtra) : []);
+    const extra = (inst && inst.firstRenewal) ? extraAll : [];
+    return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key) || c.key === cur)
+      .map((c) => ({ ...c, isExtra: extraAll.includes(c.key) }));
+  };
   const anyCert = Object.keys(draft.appliesTo).length > 0;
 
   // 이수증 날짜가 자격의 취득일(직전 갱신일)보다 이전이면 경고 (막지는 않음)
@@ -1268,25 +1319,37 @@ function RecordEditor({ title, subtitle, rec, onCancel, onSave, certList, certsM
                     <input type="checkbox" checked={on} onChange={() => toggleCert(n)} />
                     {n} <span style={{ fontWeight: 600, color: MUTE, fontSize: 12 }}>· {DEFAULT_CERTS[n].org}</span>
                   </label>
-                  {on && (
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: 8, marginTop: 8 }}>
-                      <div><label className="lbl" style={{ fontSize: 11 }}>시간</label>
-                        <input type="number" className="inp" style={{ padding: "6px 9px" }} value={draft.appliesTo[n].hours} onChange={(e) => setField(n, "hours", Number(e.target.value))} /></div>
-                      <div><label className="lbl" style={{ fontSize: 11 }}>항목</label>
-                        <select className="inp" style={{ padding: "6px 9px" }} value={draft.appliesTo[n].cat} onChange={(e) => setField(n, "cat", e.target.value)}>
-                          {(() => {
-                            const base = ["ethics", "superv", "general"];
-                            const inst = certsMap && certsMap[n];
-                            // 실제 자격의 첫 갱신 상태일 때만 추가 항목 노출
-                            const extraAll = (inst && inst.firstExtra) ? Object.keys(inst.firstExtra) : (DEFAULT_CERTS[n] && DEFAULT_CERTS[n].firstExtra ? Object.keys(DEFAULT_CERTS[n].firstExtra) : []);
-                            const extra = (inst && inst.firstRenewal) ? extraAll : [];
-                            const cur = draft.appliesTo[n].cat; // 이미 선택된 항목은 항상 보이게
-                            return CATS.filter((c) => base.includes(c.key) || extra.includes(c.key) || c.key === cur)
-                              .map((c) => <option key={c.key} value={c.key}>{c.label}{extraAll.includes(c.key) ? " (첫 갱신)" : ""}</option>);
-                          })()}
-                        </select></div>
-                    </div>
-                  )}
+                  {on && (() => {
+                    const parts = partsOf(draft.appliesTo[n]);
+                    const multi = parts.length > 1;
+                    const cols = multi ? "1fr 1.2fr 28px" : "1fr 1.2fr";
+                    return (
+                      <div style={{ marginTop: 8 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: cols, gap: 8 }}>
+                          <label className="lbl" style={{ fontSize: 11, margin: 0 }}>시간</label>
+                          <label className="lbl" style={{ fontSize: 11, margin: 0 }}>항목</label>
+                          {multi && <span />}
+                        </div>
+                        {parts.map((p, i) => (
+                          <div key={i} style={{ display: "grid", gridTemplateColumns: cols, gap: 8, marginTop: 5, alignItems: "center" }}>
+                            <input type="number" className="inp" style={{ padding: "6px 9px" }} value={p.hours} onChange={(e) => setPart(n, i, "hours", Number(e.target.value))} />
+                            <select className="inp" style={{ padding: "6px 9px" }} value={p.cat} onChange={(e) => setPart(n, i, "cat", e.target.value)}>
+                              {catOptionsFor(n, p.cat).map((c) => <option key={c.key} value={c.key}>{c.label}{c.isExtra ? " (첫 갱신)" : ""}</option>)}
+                            </select>
+                            {multi && (
+                              <button type="button" onClick={() => removePart(n, i)} title="이 줄 삭제"
+                                style={{ border: "none", background: "transparent", color: PKD, fontSize: 18, lineHeight: 1, padding: 0 }}>×</button>
+                            )}
+                          </div>
+                        ))}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+                          <button type="button" onClick={() => addPart(n)}
+                            style={{ border: "none", background: "transparent", color: PKD, fontSize: 12.5, fontWeight: 700, padding: 0 }}>+ 항목 추가</button>
+                          {multi && <span style={{ fontSize: 12.5, fontWeight: 700, color: PKD }}>합계 {draft.appliesTo[n].hours}시간</span>}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}
