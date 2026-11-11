@@ -68,6 +68,21 @@ async function refreshSession() {
   return ns;
 }
 
+// 열쇠(access_token)가 곧 만료되면 미리 새로 받아서 반환 (앱을 오래 켜 둬도 사진 저장·보기가 되게)
+async function freshToken() {
+  const s = readSession();
+  if (!s?.access_token) return null;
+  try {
+    const part = s.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(part + '='.repeat((4 - part.length % 4) % 4)));
+    if (payload.exp && payload.exp * 1000 - Date.now() < 60000) {
+      const ns = await refreshSession();
+      return ns ? ns.access_token : null;
+    }
+  } catch {}
+  return s.access_token;
+}
+
 // 앱 시작 시 호출: 저장된 세션 복원(만료 시 refresh)
 export async function restoreSession() {
   const s = readSession();
@@ -107,7 +122,7 @@ export async function login(email, password) {
 
 // ---- 로그아웃 ----
 export async function logout() {
-  const t = accessToken();
+  const t = await freshToken();
   try {
     if (t) await fetch(`${AUTH}/logout`, { method: 'POST', headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${t}` } });
   } catch {}
@@ -116,7 +131,7 @@ export async function logout() {
 
 // ---- 내 보유자격을 Auth metadata에도 저장(로그인 화면 캐시용, 선택) ----
 export async function updateMyCerts(certs) {
-  const t = accessToken();
+  const t = await freshToken();
   if (!t) return;
   try {
     await fetch(`${AUTH}/user`, {
@@ -133,7 +148,7 @@ export async function updateMyCerts(certs) {
 // 데이터 (ceu_data) — 본인 행만 (RLS)
 // ============================================================
 async function authedFetch(url, opts = {}) {
-  let t = accessToken();
+  let t = await freshToken();
   const doFetch = (tok) => fetch(url, {
     ...opts,
     headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json', ...(opts.headers || {}) },
@@ -176,7 +191,7 @@ export async function saveMyData(data) {
 // 관리자: admin-users Edge Function
 // ============================================================
 async function callAdmin(action, payload = {}) {
-  const t = accessToken();
+  const t = await freshToken();
   if (!t) return { error: '로그인이 필요합니다.' };
   const r = await fetch(`${FUNCTIONS}/admin-users`, {
     method: 'POST',
@@ -218,7 +233,7 @@ const BUCKET = "ceu-receipts";
 export async function uploadReceipt(base64, mediaType) {
   const me = currentUser();
   if (!me) return { error: "로그인이 필요합니다." };
-  const t = accessToken();
+  const t = await freshToken();
   if (!t) return { error: "로그인이 필요합니다." };
   try {
     // base64 → 바이너리(Blob)
@@ -242,7 +257,7 @@ export async function uploadReceipt(base64, mediaType) {
 // 저장 경로 → 열람용 임시 서명 URL (비공개 버킷)
 export async function getReceiptUrl(path, expiresSec = 3600) {
   if (!path) return { error: "경로 없음" };
-  const t = accessToken();
+  const t = await freshToken();
   if (!t) return { error: "로그인이 필요합니다." };
   try {
     const r = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${BUCKET}/${path}`, {
@@ -260,7 +275,7 @@ export async function getReceiptUrl(path, expiresSec = 3600) {
 
 export async function deleteReceipt(path) {
   if (!path) return { ok: true };
-  const t = accessToken();
+  const t = await freshToken();
   if (!t) return { error: "로그인이 필요합니다." };
   try {
     const r = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, {
