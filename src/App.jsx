@@ -113,7 +113,7 @@ function fmtK(iso) {
 
 function blankCert(name) {
   const b = DEFAULT_CERTS[name];
-  return { name, org: b.org, acquired: "2020-01-01", cycle: b.cycle, total: b.total, req: { ...b.req },
+  return { name, org: b.org, acquired: "", cycle: b.cycle, total: b.total, req: { ...b.req },
     note: b.note, src: b.src, firstExtra: b.firstExtra || null, training: b.training || null,
     firstRenewal: false, trainingDone: false, history: [] };
 }
@@ -261,6 +261,10 @@ export default function App() {
   const [screen, setScreen] = useState("login");
   const [activeCert, setActiveCert] = useState(null);
   const saveTimer = useRef(null);
+  const [saveState, setSaveState] = useState(null); // null | saving | saved | error
+  const latestData = useRef(null);   // 가장 최근 데이터 (다시 저장·창 닫기 때 사용)
+  const saveSeq = useRef(0);         // 저장 순번 (늦게 끝난 옛 저장 결과가 상태를 덮지 않게)
+  const dirty = useRef(false);       // 아직 서버에 안 올라간 변경이 있는지
 
   // 복사 방지
   useEffect(() => {
@@ -294,12 +298,40 @@ export default function App() {
     })();
   }, []);
 
+  // 실제 저장 (결과를 화면 위쪽 저장 상태로 표시)
+  const doSave = async (d) => {
+    const seq = ++saveSeq.current;
+    setSaveState("saving");
+    let ok = false;
+    try { const res = await saveMyData(d); ok = !!(res && res.ok); } catch (e) { ok = false; }
+    if (seq !== saveSeq.current) return; // 그 사이 새 저장이 시작됨
+    dirty.current = !ok;
+    setSaveState(ok ? "saved" : "error");
+  };
   // 데이터 변경 시 디바운스 저장
   const persist = (next) => {
     setData(next);
+    latestData.current = next;
+    dirty.current = true;
+    setSaveState("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => { saveMyData(next); }, 700);
+    saveTimer.current = setTimeout(() => { saveTimer.current = null; doSave(next); }, 700);
   };
+  const retrySave = () => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+    if (latestData.current) doSave(latestData.current);
+  };
+  // 아직 저장 안 된 변경이 있을 때 창을 닫으면: 바로 저장 시도 + 브라우저가 한 번 물어봄
+  useEffect(() => {
+    const onLeave = (e) => {
+      if (!dirty.current) return;
+      if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; if (latestData.current) doSave(latestData.current); }
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onLeave);
+    return () => window.removeEventListener("beforeunload", onLeave);
+  }, []);
 
   const doLogin = async (email, pw) => {
     const res = await sbLogin(email.trim(), pw);
@@ -314,6 +346,8 @@ export default function App() {
   };
 
   const doLogout = async () => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; if (latestData.current) await doSave(latestData.current); }
+    dirty.current = false; latestData.current = null; setSaveState(null);
     await sbLogout();
     setMe(null); setData(null); setActiveCert(null); setScreen("login");
   };
@@ -341,7 +375,10 @@ export default function App() {
     // 이 자격에 인정된 이수증만 추림 → 스냅샷
     const snapshotRecs = data.records
       .filter((r) => r.appliesTo[name])
-      .map((r) => ({ title: r.title, date: r.date, hours: r.appliesTo[name].hours, cat: r.appliesTo[name].cat, ...(isSplit(r.appliesTo[name]) ? { parts: r.appliesTo[name].parts } : {}) }));
+      .map((r) => ({ title: r.title, date: r.date, hours: r.appliesTo[name].hours, cat: r.appliesTo[name].cat,
+        ...(isSplit(r.appliesTo[name]) ? { parts: r.appliesTo[name].parts } : {}),
+        ...(r.receiptPath ? { receiptPath: r.receiptPath } : {}),
+        ...(Array.isArray(r.extraReceiptPaths) && r.extraReceiptPaths.length ? { extraReceiptPaths: r.extraReceiptPaths } : {}) }));
     const snapshot = {
       id: uid(),
       periodStart: cert.acquired,
@@ -404,7 +441,7 @@ export default function App() {
 
       {me && screen !== "login" && screen !== "pickCerts" && data && (
         <>
-          <TopBar me={me} screen={screen} setScreen={setScreen} logout={doLogout} />
+          <TopBar me={me} screen={screen} setScreen={setScreen} logout={doLogout} saveState={saveState} onRetrySave={retrySave} />
           <main style={{ maxWidth: 980, margin: "0 auto", padding: "20px 16px 40px" }}>
             {screen === "dashboard" && (
               <Dashboard me={{ ...me, myCerts: data.myCerts }} data={data} onOpen={goDetail} />
@@ -520,7 +557,7 @@ function PickCerts({ me, onDone }) {
 }
 
 /* ---------------- 상단바 ---------------- */
-function TopBar({ me, screen, setScreen, logout }) {
+function TopBar({ me, screen, setScreen, logout, saveState, onRetrySave }) {
   const Tab = ({ id, label }) => (
     <button onClick={() => setScreen(id)} className="btn"
       style={{ background: screen === id ? PK : "transparent", color: screen === id ? "#fff" : INK, padding: "7px 12px" }}>{label}</button>
@@ -535,6 +572,14 @@ function TopBar({ me, screen, setScreen, logout }) {
         <Tab id="dashboard" label="한눈에 보기" />
         <Tab id="settings" label="설정" />
         {me.role === "admin" && <Tab id="admin" label="관리자" />}
+        {saveState === "saving" && <span style={{ fontSize: 12, fontWeight: 700, borderRadius: 999, padding: "3px 10px", background: PKL, color: PKD }}>저장 중…</span>}
+        {saveState === "saved" && <span style={{ fontSize: 12, fontWeight: 700, borderRadius: 999, padding: "3px 10px", background: "#EAF7F0", color: OK }}>저장됨 ✓</span>}
+        {saveState === "error" && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, borderRadius: 999, padding: "3px 10px", background: "#FDECEE", color: BAD }}>저장 안 됨 · 인터넷 확인</span>
+            <button onClick={onRetrySave} className="btn btn-ghost" style={{ padding: "4px 10px", fontSize: 12 }}>다시 저장</button>
+          </span>
+        )}
         <span style={{ fontSize: 12.5, color: MUTE, marginLeft: 4 }}>{me.name}</span>
         <button onClick={logout} className="btn btn-ghost" style={{ padding: "7px 11px" }}>로그아웃</button>
       </div>
@@ -715,7 +760,9 @@ function Dashboard({ me, data, onOpen }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 14 }}>
         {cards.map((c) => {
           let ddBg = OK, ddTxt = `D-${c.dday}`, ddMsg = "여유";
-          if (c.dday < 0) { ddBg = BAD; ddTxt = `D+${-c.dday}`; ddMsg = "기한 경과"; }
+          const noDate = c.dday === null;
+          if (noDate) { ddBg = "#F1EFE8"; ddTxt = "취득일 입력 필요"; }
+          else if (c.dday < 0) { ddBg = BAD; ddTxt = `D+${-c.dday}`; ddMsg = "기한 경과"; }
           else if (c.dday <= 90) { ddBg = BAD; ddMsg = "임박"; }
           else if (c.dday <= 180) { ddBg = WARN; ddMsg = "준비"; }
           const complete = c.done >= c.tot && c.lacks.every((l) => l.lack === 0);
@@ -726,7 +773,7 @@ function Dashboard({ me, data, onOpen }) {
                   <div style={{ fontWeight: 800, fontSize: 18 }}>{c.n}</div>
                   <div style={{ fontSize: 12, color: MUTE, marginTop: 2 }}>{c.cert.org}</div>
                 </div>
-                <span style={{ background: ddBg, color: "#fff", borderRadius: 999, padding: "4px 10px", fontWeight: 800, fontSize: 12.5 }}>{ddTxt}</span>
+                <span style={{ background: ddBg, color: noDate ? "#5F5E5A" : "#fff", borderRadius: 999, padding: "4px 10px", fontWeight: 800, fontSize: 12.5, flexShrink: 0 }}>{ddTxt}</span>
               </div>
 
               <div style={{ margin: "14px 0 6px", display: "flex", justifyContent: "space-between", fontSize: 13 }}>
@@ -749,7 +796,7 @@ function Dashboard({ me, data, onOpen }) {
               )}
 
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
-                <div style={{ fontSize: 12, color: MUTE }}>갱신예정 {fmtK(c.renewal)}</div>
+                <div style={{ fontSize: 12, color: MUTE }}>{noDate ? "취득일을 넣으면 갱신일이 계산돼요" : `갱신예정 ${fmtK(c.renewal)}`}</div>
                 <span style={{ fontSize: 12, fontWeight: 700, color: PKD }}>이수증 관리 →</span>
               </div>
             </button>
@@ -783,6 +830,9 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
             <div style={{ fontSize: 22, fontWeight: 800 }}>{cert.name}</div>
             <div style={{ fontSize: 13, color: MUTE, marginTop: 3 }}>{cert.org} · 갱신주기 {cert.cycle}개월 · 필요시간 {tot}시간{cert.firstRenewal && cert.firstExtra ? " (첫 갱신 추가 포함)" : ""}</div>
           </div>
+          {dday === null && (
+            <span style={{ background: "#F1EFE8", color: "#5F5E5A", borderRadius: 999, padding: "5px 13px", fontWeight: 800, fontSize: 13 }}>취득일 입력 필요</span>
+          )}
           {dday !== null && (
             <span style={{ background: dday < 0 ? BAD : dday <= 90 ? BAD : dday <= 180 ? WARN : OK, color: "#fff", borderRadius: 999, padding: "5px 13px", fontWeight: 800, fontSize: 15 }}>
               {dday < 0 ? `D+${-dday}` : `D-${dday}`}
@@ -798,7 +848,7 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
           <div><label className="lbl">이수필요시간</label>
             <input type="number" className="inp" value={cert.total} onChange={(e) => onChangeCert({ total: Number(e.target.value) })} /></div>
           <div><label className="lbl">갱신예정일(자동)</label>
-            <div className="inp" style={{ background: PKL, fontWeight: 700, color: PKD }}>{fmtK(renewalDate)}</div></div>
+            <div className="inp" style={{ background: PKL, fontWeight: 700, color: PKD }}>{renewalDate ? fmtK(renewalDate) : "취득일을 먼저 넣어 주세요"}</div></div>
         </div>
 
         {cert.note && (
@@ -892,7 +942,7 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
                         {h.records.map((r, i) => (
                           <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, borderTop: i ? `1px solid ${LINE}` : "none", paddingTop: i ? 5 : 0 }}>
                             <span style={{ minWidth: 0 }}>{r.title || "(제목 없음)"}</span>
-                            <span style={{ color: MUTE, flexShrink: 0 }}>{fmtK(r.date)} · {r.hours}h · {isSplit(r) ? partsLabel(r) : catLabel(r.cat)}</span>
+                            <span style={{ color: MUTE, flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 6 }}>{fmtK(r.date)} · {r.hours}h · {isSplit(r) ? partsLabel(r) : catLabel(r.cat)}{r.receiptPath && <ReceiptButton path={r.receiptPath} small />}</span>
                           </div>
                         ))}
                       </div>
@@ -912,7 +962,9 @@ function Detail({ cert, records, onBack, onChangeCert, setRecords, activeCert, a
           이 자격의 갱신을 마쳤다면 <b>새 주기 시작</b>을 누르세요. 현재 {cert.name} 이수증은 <b>지난 주기 이력</b>으로 보관되고,
           취득일이 {fmtK(renewalDate)}로 갱신되며 새 주기는 0시간부터 시작됩니다. (다른 자격은 영향받지 않아요.)
         </div>
-        {!confirmCycle ? (
+        {!renewalDate ? (
+          <div style={{ fontSize: 12.5, color: MUTE, fontWeight: 700 }}>취득일을 먼저 넣어야 새 주기를 시작할 수 있어요.</div>
+        ) : !confirmCycle ? (
           <button className="btn btn-ghost" style={{ background: "#fff" }} onClick={() => setConfirmCycle(true)}>🔄 새 주기 시작</button>
         ) : (
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -1045,7 +1097,16 @@ function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
   });
   const delRecord = (id) => setRecords((rs) => {
     const target = rs.find((r) => r.id === id);
-    if (target && target.receiptPath) { deleteReceipt(target.receiptPath); }
+    // 지난 주기 이력에서 쓰는 원본 사진은 지우지 않음
+    const inHistory = new Set();
+    Object.values(certsMap || {}).forEach((c) => (c.history || []).forEach((h) => (h.records || []).forEach((hr) => {
+      if (hr.receiptPath) inHistory.add(hr.receiptPath);
+      (hr.extraReceiptPaths || []).forEach((x) => inHistory.add(x));
+    })));
+    const drop = (pth) => { if (pth && !inHistory.has(pth)) deleteReceipt(pth); };
+    if (target && target.receiptPath) drop(target.receiptPath);
+    // 합치면서 따로 보관된 원본 사진도 함께 정리
+    if (target && Array.isArray(target.extraReceiptPaths)) target.extraReceiptPaths.forEach(drop);
     return rs.filter((r) => r.id !== id);
   });
 
@@ -1172,15 +1233,34 @@ function RecordManager({ activeCert, records, setRecords, myCerts, certsMap }) {
       )}
 
       {review && <RecordEditor title="인식 결과 확인" subtitle="AI가 읽은 내용이에요. 자격·시간·항목을 확인하고 저장하세요." certList={certList} certsMap={certsMap} existingRecords={records}
-        rec={review} onCancel={() => setReview(null)} onSave={(rec) => { saveRecord(rec); setReview(null); }} />}
+        rec={review} onCancel={() => { if (review.receiptPath) deleteReceipt(review.receiptPath); setReview(null); }} onSave={(rec) => { saveRecord(rec); setReview(null); }} />}
       {editing && <RecordEditor title={records.some((r) => r.id === editing.id) ? "이수증 편집" : "이수증 직접 추가"} certList={certList} certsMap={certsMap} existingRecords={records}
         rec={editing} onCancel={() => setEditing(null)} onSave={(rec) => { saveRecord(rec); setEditing(null); }} />}
     </div>
   );
 }
 
+// 원본 사진 보기 버튼 (지난 주기 이력용)
+function ReceiptButton({ path, small }) {
+  const [loading, setLoading] = useState(false);
+  const open = async () => {
+    if (loading) return;
+    setLoading(true);
+    const res = await getReceiptUrl(path);
+    setLoading(false);
+    if (res && res.url) window.open(res.url, "_blank");
+    else alert("원본을 불러오지 못했습니다.");
+  };
+  return (
+    <button onClick={open} className="btn btn-ghost" style={{ padding: small ? "2px 8px" : "5px 10px", fontSize: small ? 11.5 : 12.5 }}>
+      {loading ? "…" : "📎 원본"}
+    </button>
+  );
+}
+
 function RecordRow({ rec, activeCert, onEdit, onDelete }) {
   const list = CERT_NAMES.filter((n) => rec.appliesTo[n]);
+  const [askDel, setAskDel] = useState(false);
   const [loadingImg, setLoadingImg] = useState(false);
   const viewReceipt = async () => {
     if (loadingImg) return;
@@ -1204,9 +1284,18 @@ function RecordRow({ rec, activeCert, onEdit, onDelete }) {
             </button>
           )}
           <button onClick={onEdit} className="btn btn-ghost" style={{ padding: "5px 10px", fontSize: 12.5 }}>편집</button>
-          <button onClick={onDelete} style={{ border: "none", background: "transparent", color: MUTE, fontSize: 18, lineHeight: 1 }}>×</button>
+          <button onClick={() => setAskDel(true)} title="삭제" style={{ border: "none", background: "transparent", color: MUTE, fontSize: 18, lineHeight: 1 }}>×</button>
         </div>
       </div>
+      {askDel && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 10, background: "#FDECEE", borderRadius: 9, padding: "8px 10px" }}>
+          <span style={{ fontSize: 12.5, color: BAD, fontWeight: 700 }}>이 이수증{rec.receiptPath ? "과 원본 사진" : ""}을 지울까요? 되돌릴 수 없어요.</span>
+          <span style={{ display: "flex", gap: 6 }}>
+            <button className="btn btn-ghost" style={{ padding: "5px 12px", fontSize: 12.5, background: "#fff" }} onClick={() => setAskDel(false)}>취소</button>
+            <button className="btn" style={{ padding: "5px 12px", fontSize: 12.5, background: BAD, color: "#fff" }} onClick={() => { setAskDel(false); onDelete(); }}>지우기</button>
+          </span>
+        </div>
+      )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
         {list.map((n) => {
           const a = rec.appliesTo[n], on = n === activeCert;
